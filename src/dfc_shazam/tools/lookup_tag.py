@@ -32,8 +32,18 @@ def _parse_version(tag: str) -> tuple[list[int], str]:
     return [], tag
 
 
+def _get_tag_variant(tag: str) -> str:
+    """Determine the variant of a tag (distroless, slim, or dev)."""
+    tag_lower = tag.lower()
+    if "-dev" in tag_lower:
+        return "dev"
+    elif "-slim" in tag_lower:
+        return "slim"
+    return "distroless"
+
+
 def _score_tag_match(
-    original_tag: str, candidate_tag: str, prefer_dev: bool = False
+    original_tag: str, candidate_tag: str, preferred_variant: str = "distroless"
 ) -> float:
     """Score how well a candidate tag matches the original tag.
 
@@ -42,35 +52,39 @@ def _score_tag_match(
     Args:
         original_tag: The original tag to match
         candidate_tag: The candidate Chainguard tag
-        prefer_dev: If True, prefer -dev variants
+        preferred_variant: 'distroless', 'slim', or 'dev'
     """
     # Normalize tags
     orig_lower = original_tag.lower()
     cand_lower = candidate_tag.lower()
 
-    is_dev_candidate = "-dev" in cand_lower
+    candidate_variant = _get_tag_variant(candidate_tag)
+    variant_matches = candidate_variant == preferred_variant
 
     # Special handling for "latest" - do this first before exact match checks
     if orig_lower == "latest":
-        if cand_lower == "latest-dev":
-            return 1.0 if prefer_dev else 0.5
-        if cand_lower == "latest":
-            return 0.7 if prefer_dev else 1.0
+        if cand_lower == f"latest-{preferred_variant}" or (
+            preferred_variant == "distroless" and cand_lower == "latest"
+        ):
+            return 1.0
+        if cand_lower.startswith("latest"):
+            return 0.7 if variant_matches else 0.4
         # Any other tag is a fallback
         return 0.3
 
-    # Check if candidate is the -dev version of the original tag
-    # e.g., original="18", candidate="18-dev"
-    if cand_lower == f"{orig_lower}-dev":
-        return 1.0 if prefer_dev else 0.5
+    # Check if candidate is the preferred variant version of the original tag
+    # e.g., original="18", candidate="18-dev" when preferred_variant="dev"
+    if preferred_variant != "distroless":
+        if cand_lower == f"{orig_lower}-{preferred_variant}":
+            return 1.0
 
-    # Exact match - but if we prefer dev, penalize non-dev exact matches
+    # Exact match (for distroless, this is the base tag without suffix)
     if original_tag == candidate_tag:
-        return 0.7 if prefer_dev else 1.0
+        return 1.0 if variant_matches else 0.5
 
     # Case-insensitive exact match
     if orig_lower == cand_lower:
-        return 0.69 if prefer_dev else 0.99
+        return 0.99 if variant_matches else 0.49
 
     orig_parts, orig_suffix = _parse_version(orig_lower)
     cand_parts, cand_suffix = _parse_version(cand_lower)
@@ -100,26 +114,20 @@ def _score_tag_match(
         if len(cand_parts) > len(orig_parts):
             score *= 0.95
 
-    # Handle -dev variant preference (is_dev_candidate defined at top)
-    if prefer_dev:
-        # We want a -dev variant
-        if is_dev_candidate:
-            score += 0.1  # Bonus for -dev when we want it
-        else:
-            score *= 0.7  # Penalize non-dev when we want dev
+    # Handle variant preference
+    if variant_matches:
+        score += 0.1  # Bonus for matching variant
     else:
-        # We prefer distroless (non-dev)
-        if is_dev_candidate:
-            score *= 0.5  # Penalize -dev when we don't need it
+        score *= 0.5  # Penalize non-matching variant
 
-    # Handle suffix matching (excluding -dev which is handled above)
-    orig_suffix_no_dev = orig_suffix.replace("-dev", "")
-    cand_suffix_no_dev = cand_suffix.replace("-dev", "")
+    # Handle suffix matching (excluding variant suffixes)
+    orig_suffix_clean = orig_suffix.replace("-dev", "").replace("-slim", "")
+    cand_suffix_clean = cand_suffix.replace("-dev", "").replace("-slim", "")
 
-    if orig_suffix_no_dev and cand_suffix_no_dev:
-        if orig_suffix_no_dev == cand_suffix_no_dev:
+    if orig_suffix_clean and cand_suffix_clean:
+        if orig_suffix_clean == cand_suffix_clean:
             score += 0.05
-    elif orig_suffix_no_dev and not cand_suffix_no_dev:
+    elif orig_suffix_clean and not cand_suffix_clean:
         # Original has suffix (like -alpine), candidate doesn't
         # This is expected for Chainguard - don't penalize too much
         pass
@@ -128,7 +136,7 @@ def _score_tag_match(
 
 
 def _find_best_tag(
-    original_tag: str, available_tags: list[str], prefer_dev: bool = False
+    original_tag: str, available_tags: list[str], preferred_variant: str = "distroless"
 ) -> tuple[str | None, float]:
     """Find the best matching tag from available tags.
 
@@ -141,7 +149,7 @@ def _find_best_tag(
     best_score = 0.0
 
     for tag in available_tags:
-        score = _score_tag_match(original_tag, tag, prefer_dev=prefer_dev)
+        score = _score_tag_match(original_tag, tag, preferred_variant=preferred_variant)
         if score > best_score:
             best_score = score
             best_tag = tag
@@ -152,7 +160,7 @@ def _find_best_tag(
 def _get_sorted_tags(
     original_tag: str,
     all_tags: list[str],
-    prefer_dev: bool,
+    preferred_variant: str,
     limit: int = 20,
 ) -> list[str]:
     """Sort tags by relevance to original_tag and return top N.
@@ -163,9 +171,14 @@ def _get_sorted_tags(
     if not all_tags:
         return []
 
-    scored = [(tag, _score_tag_match(original_tag, tag, prefer_dev)) for tag in all_tags]
+    scored = [(tag, _score_tag_match(original_tag, tag, preferred_variant)) for tag in all_tags]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [tag for tag, _ in scored[:limit]]
+
+
+def _has_slim_tags(tags: list[str]) -> bool:
+    """Check if any tags have the -slim variant."""
+    return any("-slim" in tag.lower() for tag in tags)
 
 
 async def lookup_tag(
@@ -181,12 +194,15 @@ async def lookup_tag(
         str,
         Field(description="Original tag to find a match for (e.g., '3.12', '18-alpine', 'latest')"),
     ],
-    require_dev: Annotated[
-        bool,
+    variant: Annotated[
+        str,
         Field(
-            description="Whether to use the -dev variant. YOU MUST EXPLICITLY ASK THE USER: "
-            "'Do you need shell access or package manager (apk) in your final container image?' "
-            "Set True if user says yes, False if user says no. DO NOT GUESS - always ask first."
+            description="Image variant to use. YOU MUST ASK THE USER before calling this tool. "
+            "Valid values: 'distroless', 'slim', or 'dev'. "
+            "Ask: 'Which image variant do you need? (distroless/slim/dev)' - "
+            "distroless: Smallest, most secure, no shell or package manager. "
+            "slim: Includes shell but no package manager. "
+            "dev: Includes shell and apk package manager for building/debugging."
         ),
     ],
 ) -> TagLookupResult:
@@ -195,44 +211,53 @@ async def lookup_tag(
     Lists available tags for a Chainguard image using chainctl and finds
     the closest match to the original tag based on version and variant matching.
 
-    CRITICAL: Before calling this tool, you MUST prompt the user with this question:
-        "Do you need shell access or a package manager (apk) in your final container image?
-        - Choose YES if you need to: run shell scripts, install packages at runtime, or debug interactively
-        - Choose NO for a smaller, more secure distroless image (recommended for production)"
+    CRITICAL: Before calling this tool, you MUST prompt the user to choose a variant.
+
+    If -slim tags are available for the image, ask:
+        "Which image variant do you need?
+        - distroless: Smallest and most secure, no shell or package manager (recommended for production)
+        - slim: Includes a shell but no package manager
+        - dev: Includes shell and apk package manager (for building apps or debugging)"
+
+    If NO -slim tags are available, ask:
+        "Which image variant do you need?
+        - distroless: Smallest and most secure, no shell or package manager (recommended for production)
+        - dev: Includes shell and apk package manager (for building apps or debugging)"
 
     DO NOT infer or guess the answer from the Dockerfile - explicitly ask the user.
 
-    Based on user response:
-    - User says YES -> require_dev=True (returns -dev variant with shell/apk)
-    - User says NO -> require_dev=False (returns distroless variant, no shell)
+    Based on user response, set variant to: 'distroless', 'slim', or 'dev'
 
-    IMPORTANT - Non-dev (distroless) variant limitations:
-    The non-dev variants do NOT include a shell or apk package manager. You CANNOT run
-    `apk add` in a distroless image. If the Dockerfile needs to install packages, you have
-    two options:
+    IMPORTANT - Variant capabilities:
+    - distroless: No shell, no apk. Cannot run shell commands or install packages.
+    - slim: Has shell (/bin/sh), but no apk. Can run shell scripts but cannot install packages.
+    - dev: Has shell and apk. Can run shell scripts and install packages with apk add.
 
-    1. Use a multi-stage build pattern:
-       - Build stage: Use the -dev variant to install packages and build artifacts
-       - Runtime stage: Use the distroless variant and COPY artifacts from build stage
+    If the Dockerfile needs to install packages but user wants distroless for production,
+    use a multi-stage build pattern:
+        FROM cgr.dev/{org}/python:latest-dev AS builder
+        USER root
+        RUN apk add --no-cache build-base
+        RUN pip install --user mypackage
+        USER nonroot
 
-       Example:
-           FROM cgr.dev/{org}/python:latest-dev AS builder
-           USER root
-           RUN apk add --no-cache build-base
-           RUN pip install --user mypackage
-           USER nonroot
-
-           FROM cgr.dev/{org}/python:latest
-           COPY --from=builder /home/nonroot/.local /home/nonroot/.local
-
-    2. Use the -dev variant for the final image (if shell/apk is truly needed at runtime)
-
-    The multi-stage pattern is preferred for production as it results in smaller,
-    more secure images without shell or package manager attack surface.
+        FROM cgr.dev/{org}/python:latest
+        COPY --from=builder /home/nonroot/.local /home/nonroot/.local
 
     NOTE: You must call lookup_chainguard_image first to select an organization
     before using this tool.
     """
+    # Validate variant parameter
+    variant_lower = variant.lower()
+    if variant_lower not in ("distroless", "slim", "dev"):
+        return TagLookupResult(
+            found=False,
+            chainguard_image=chainguard_image,
+            original_image=original_image,
+            original_tag=original_tag,
+            message=f"Invalid variant '{variant}'. Must be 'distroless', 'slim', or 'dev'.",
+        )
+
     org = OrgSession.get_org()
     if org is None:
         return TagLookupResult(
@@ -266,10 +291,25 @@ async def lookup_tag(
             message=f"No tags found for cgr.dev/{org}/{chainguard_image}",
         )
 
-    best_tag, score = _find_best_tag(original_tag, tag_names, prefer_dev=require_dev)
+    # Check if slim tags are available and warn if requested but not available
+    has_slim = _has_slim_tags(tag_names)
+    if variant_lower == "slim" and not has_slim:
+        return TagLookupResult(
+            found=False,
+            chainguard_image=chainguard_image,
+            original_image=original_image,
+            original_tag=original_tag,
+            available_tags=_get_sorted_tags(original_tag, tag_names, "distroless"),
+            variant=variant_lower,
+            has_slim_variant=False,
+            message=f"No -slim tags available for {chainguard_image}. "
+            "Choose 'distroless' (no shell) or 'dev' (shell + apk).",
+        )
+
+    best_tag, score = _find_best_tag(original_tag, tag_names, preferred_variant=variant_lower)
 
     # Sort tags by relevance for display
-    sorted_tags = _get_sorted_tags(original_tag, tag_names, require_dev)
+    sorted_tags = _get_sorted_tags(original_tag, tag_names, variant_lower)
 
     if best_tag is None or score < 0.3:
         return TagLookupResult(
@@ -278,7 +318,8 @@ async def lookup_tag(
             original_image=original_image,
             original_tag=original_tag,
             available_tags=sorted_tags,
-            using_dev_variant=require_dev,
+            variant=variant_lower,
+            has_slim_variant=has_slim,
             message=f"No suitable tag match found for '{original_tag}'. "
             f"Available tags: {', '.join(sorted_tags[:10])}{'...' if len(sorted_tags) > 10 else ''}",
         )
@@ -287,11 +328,12 @@ async def lookup_tag(
     if score < 1.0:
         messages.append(f"Matched '{original_tag}' to '{best_tag}' (confidence: {score:.0%})")
 
-    is_dev_tag = "-dev" in best_tag
-    if require_dev and not is_dev_tag:
+    matched_variant = _get_tag_variant(best_tag)
+    if variant_lower != matched_variant:
+        suffix = f"-{variant_lower}" if variant_lower != "distroless" else ""
         messages.append(
-            f"Note: -dev variant was requested but '{best_tag}' was the best version match. "
-            "You may want to append '-dev' to this tag if shell/package manager access is needed."
+            f"Note: '{variant_lower}' variant was requested but '{best_tag}' was the best version match. "
+            f"You may want to use '{original_tag}{suffix}' if available."
         )
 
     return TagLookupResult(
@@ -302,6 +344,7 @@ async def lookup_tag(
         matched_tag=best_tag,
         full_image_ref=f"cgr.dev/{org}/{chainguard_image}:{best_tag}",
         available_tags=sorted_tags,
-        using_dev_variant=is_dev_tag,
+        variant=matched_variant,
+        has_slim_variant=has_slim,
         message=" ".join(messages) if messages else None,
     )

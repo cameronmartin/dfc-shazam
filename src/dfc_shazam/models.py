@@ -23,12 +23,49 @@ class ChainguardImageResult(BaseModel):
     )
 
 
+class ImageConfig(BaseModel):
+    """Container image configuration from crane config."""
+
+    entrypoint: list[str] | None = Field(
+        default=None,
+        description="Container entrypoint command",
+    )
+    cmd: list[str] | None = Field(
+        default=None,
+        description="Default command arguments",
+    )
+    user: str | None = Field(
+        default=None,
+        description="User the container runs as (UID or username)",
+    )
+    workdir: str | None = Field(
+        default=None,
+        description="Working directory inside the container",
+    )
+    env: list[str] = Field(
+        default_factory=list,
+        description="Environment variables set in the image",
+    )
+    has_shell: bool = Field(
+        default=False,
+        description="True if /bin/sh or similar shell is available",
+    )
+    has_apk: bool = Field(
+        default=False,
+        description="True if apk package manager is available",
+    )
+
+
 class ImageVerificationResult(BaseModel):
     """Result of image tag verification."""
 
     exists: bool
     image_reference: str
     digest: str | None = None
+    config: ImageConfig | None = Field(
+        default=None,
+        description="Container configuration (entrypoint, user, shell availability, etc.)",
+    )
     message: str | None = None
 
 
@@ -173,8 +210,12 @@ class TagLookupResult(BaseModel):
         "Use this value when calling verify_image_tag.",
     )
     available_tags: list[str] = Field(default_factory=list)
-    using_dev_variant: bool = Field(
+    variant: str | None = Field(
+        default=None,
+        description="The variant of the matched tag: 'distroless', 'slim', or 'dev'",
+    )
+    has_slim_variant: bool = Field(
         default=False,
-        description="True if the matched tag is a -dev variant",
+        description="True if -slim tags are available for this image",
     )
     message: str | None = None
