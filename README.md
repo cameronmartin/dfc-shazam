@@ -29,7 +29,9 @@ dfc-shazam provides AI assistants with tools to help convert Dockerfiles to use 
    chainctl auth login
    ```
 
-3. **Docker** (optional) - Required for `verify_apk_packages` and `get_image_overview` filesystem inspection
+3. **crane** (optional) - Required for `verify_image_tag` to retrieve image configuration (entrypoint, shell/apk availability). Installed with `go install github.com/google/go-containerregistry/cmd/crane@latest`
+
+4. **Docker** (optional) - Required for `verify_apk_packages` and `get_image_overview` filesystem inspection
 
 ## Installation
 
@@ -118,18 +120,28 @@ Output:
 
 ### verify_image_tag
 
-Verify an image:tag exists in the Chainguard registry.
+Verify an image:tag exists in the Chainguard registry and retrieve its configuration.
 
 **Parameters:**
-- `image_reference` (required): Full image reference (e.g., "cgr.dev/chainguard/python:3.12")
+- `image_reference` (required): Full image reference (e.g., "cgr.dev/{org}/python:3.12")
 
 **Example:**
 ```
-Input: image_reference="cgr.dev/chainguard/python:3.12"
+Input: image_reference="cgr.dev/my-org/python:3.12"
 Output:
   - exists: true
   - digest: sha256:abc123...
+  - config:
+      entrypoint: ["/usr/bin/python"]
+      cmd: null
+      user: "65532"
+      workdir: "/app"
+      env: ["PATH=...", "SSL_CERT_FILE=..."]
+      has_shell: false
+      has_apk: false
 ```
+
+Note: `config` requires `crane` to be installed. The `has_shell` and `has_apk` fields indicate whether the image contains a shell and/or apk package manager.
 
 ### search_apk_packages
 
@@ -177,17 +189,26 @@ Find the best matching Chainguard tag for an original image tag.
 - `chainguard_image` (required): Chainguard image name (e.g., "python", "node")
 - `original_image` (required): Original source image name (e.g., "python", "node:18-alpine")
 - `original_tag` (required): Original tag to match (e.g., "3.12", "18-alpine", "latest")
-- `require_dev` (required): Whether to prefer -dev variant (includes shell/apk)
+- `variant` (required): Image variant - "distroless", "slim", or "dev"
 
 **Example:**
 ```
-Input: chainguard_image="python", original_image="python", original_tag="3.12", require_dev=false
+Input: chainguard_image="python", original_image="python", original_tag="3.12", variant="distroless"
 Output:
   - found: true
   - matched_tag: "3.12"
   - full_image_ref: "cgr.dev/my-org/python:3.12"
+  - variant: "distroless"
+  - has_slim_variant: false
   - available_tags: ["3.12", "3.12-dev", "3.11", ...]
 ```
+
+**Variants:**
+- `distroless`: Smallest and most secure, no shell or package manager (recommended for production)
+- `slim`: Includes a shell but no package manager
+- `dev`: Includes shell and apk package manager (for building apps or debugging)
+
+Note: Not all images have `-slim` variants. The `has_slim_variant` field indicates availability.
 
 ### verify_apk_packages
 
