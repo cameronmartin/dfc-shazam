@@ -1,0 +1,20 @@
+name: "java_quarkus"
+description: "Quarkus app on RHEL-based image"
+language: "java"
+complexity: "complex"
+tags: [java, quarkus, yum, rhel]
+
+source:
+  base_image: "registry.access.redhat.com/ubi9/openjdk-21"
+  package_manager: "yum"
+  packages: []
+
+expected:
+  base_image: "cgr.dev/chainguard/jdk:latest"
+  packages: []
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: false

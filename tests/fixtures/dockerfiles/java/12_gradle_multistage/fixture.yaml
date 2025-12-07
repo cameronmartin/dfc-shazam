@@ -1,0 +1,20 @@
+name: "java_gradle_multistage"
+description: "Java app with Gradle multi-stage build"
+language: "java"
+complexity: "moderate"
+tags: [java, gradle, multistage]
+
+source:
+  base_image: "gradle:8-jdk21"
+  package_manager: "apt"
+  packages: []
+
+expected:
+  base_image: "cgr.dev/chainguard/gradle:latest-dev"
+  packages: []
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: false

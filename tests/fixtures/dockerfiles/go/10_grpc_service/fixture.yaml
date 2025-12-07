@@ -1,0 +1,24 @@
+name: "go_grpc_service"
+description: "Go gRPC service with protobuf"
+language: "go"
+complexity: "moderate"
+tags: [go, grpc, protobuf, apt]
+
+source:
+  base_image: "golang:1.21"
+  package_manager: "apt"
+  packages: [protobuf-compiler]
+
+expected:
+  base_image: "cgr.dev/chainguard/go:latest-dev"
+  packages: [protobuf]
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: true
+  healthcheck:
+    type: "tcp"
+    port: 50051
+    timeout: 30

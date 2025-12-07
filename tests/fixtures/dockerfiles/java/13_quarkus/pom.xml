@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>quarkus-app</artifactId>
+    <version>1.0.0</version>
+    <properties>
+        <quarkus.version>3.6.0</quarkus.version>
+    </properties>
+</project>

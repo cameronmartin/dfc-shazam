@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "dfc-shazam": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/path/to/dfc-shazam",
+        "dfc-shazam"
+      ]
+    }
+  }
+}

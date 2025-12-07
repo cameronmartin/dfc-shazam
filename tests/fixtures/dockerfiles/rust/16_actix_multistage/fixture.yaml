@@ -1,0 +1,23 @@
+name: "rust_actix_multistage"
+description: "Actix-web app with multi-stage build"
+language: "rust"
+complexity: "moderate"
+tags: [rust, actix, multistage]
+
+source:
+  base_image: "rust:1.75"
+  package_manager: "apt"
+  packages: []
+
+expected:
+  base_image: "cgr.dev/chainguard/rust:latest-dev"
+  packages: []
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: false
+
+multistage:
+  stages: 2

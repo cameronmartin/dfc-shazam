@@ -1,0 +1,20 @@
+name: "ruby_rails_basic"
+description: "Basic Rails app"
+language: "ruby"
+complexity: "moderate"
+tags: [ruby, rails, apt]
+
+source:
+  base_image: "ruby:3.2-slim"
+  package_manager: "apt"
+  packages: [build-essential, libpq-dev, nodejs]
+
+expected:
+  base_image: "cgr.dev/chainguard/ruby:latest-dev"
+  packages: [build-base, postgresql-dev, nodejs]
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: false

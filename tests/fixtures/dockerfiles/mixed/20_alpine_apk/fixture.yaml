@@ -1,0 +1,25 @@
+name: "alpine_apk"
+description: "Alpine-based image already using apk"
+language: "python"
+complexity: "simple"
+tags: [alpine, apk, python]
+
+source:
+  base_image: "python:3.11-alpine"
+  package_manager: "apk"
+  packages: [build-base, libffi-dev]
+
+expected:
+  base_image: "cgr.dev/chainguard/python:latest-dev"
+  packages: [build-base, libffi-dev]
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: true
+  healthcheck:
+    type: "http"
+    port: 8000
+    path: "/health"
+    timeout: 30

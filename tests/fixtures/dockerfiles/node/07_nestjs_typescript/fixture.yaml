@@ -1,0 +1,25 @@
+name: "node_nestjs_typescript"
+description: "NestJS app with TypeScript"
+language: "node"
+complexity: "moderate"
+tags: [node, nestjs, typescript, apt]
+
+source:
+  base_image: "node:20-slim"
+  package_manager: "apt"
+  packages: [python3, make, g++]
+
+expected:
+  base_image: "cgr.dev/chainguard/node:latest-dev"
+  packages: [python-3, make, g++]
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: true
+  healthcheck:
+    type: "http"
+    port: 3000
+    path: "/health"
+    timeout: 30

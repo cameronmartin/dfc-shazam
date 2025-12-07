@@ -1,0 +1,25 @@
+name: "python_flask_basic"
+description: "Basic Flask app with apt packages"
+language: "python"
+complexity: "simple"
+tags: [python, flask, apt, debian]
+
+source:
+  base_image: "python:3.11-slim"
+  package_manager: "apt"
+  packages: [libpq-dev, build-essential]
+
+expected:
+  base_image: "cgr.dev/chainguard/python:latest-dev"
+  packages: [postgresql-dev, build-base]
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: true
+  healthcheck:
+    type: "http"
+    port: 5000
+    path: "/health"
+    timeout: 30

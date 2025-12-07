@@ -1,0 +1,29 @@
+name: "python_fastapi_multistage"
+description: "FastAPI app with multi-stage build"
+language: "python"
+complexity: "moderate"
+tags: [python, fastapi, multistage, apt]
+
+source:
+  base_image: "python:3.12-slim"
+  package_manager: "apt"
+  packages: [build-essential]
+
+expected:
+  base_image: "cgr.dev/chainguard/python:latest"
+  packages: []
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: true
+  healthcheck:
+    type: "http"
+    port: 8000
+    path: "/health"
+    timeout: 30
+
+multistage:
+  stages: 2
+  final_stage_name: "runtime"

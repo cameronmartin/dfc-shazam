@@ -1,0 +1,20 @@
+name: "php_laravel"
+description: "Laravel PHP app"
+language: "php"
+complexity: "moderate"
+tags: [php, laravel, apt]
+
+source:
+  base_image: "php:8.3-fpm"
+  package_manager: "apt"
+  packages: [libpng-dev, libzip-dev, unzip]
+
+expected:
+  base_image: "cgr.dev/chainguard/php:latest-dev"
+  packages: [libpng-dev, libzip-dev, unzip]
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: false

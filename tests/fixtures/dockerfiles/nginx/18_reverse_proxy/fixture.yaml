@@ -1,0 +1,25 @@
+name: "nginx_reverse_proxy"
+description: "Nginx as reverse proxy"
+language: "nginx"
+complexity: "simple"
+tags: [nginx, proxy]
+
+source:
+  base_image: "nginx:1.25-alpine"
+  package_manager: "apk"
+  packages: []
+
+expected:
+  base_image: "cgr.dev/chainguard/nginx:latest"
+  packages: []
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: true
+  healthcheck:
+    type: "http"
+    port: 80
+    path: "/health"
+    timeout: 30

@@ -1,0 +1,25 @@
+name: "python_django_postgres"
+description: "Django app with PostgreSQL and Celery"
+language: "python"
+complexity: "moderate"
+tags: [python, django, postgres, apt, celery]
+
+source:
+  base_image: "python:3.12-slim"
+  package_manager: "apt"
+  packages: [libpq-dev, build-essential, libffi-dev]
+
+expected:
+  base_image: "cgr.dev/chainguard/python:latest-dev"
+  packages: [postgresql-dev, build-base, libffi-dev]
+
+build:
+  dockerfile: "Dockerfile"
+
+runtime:
+  enabled: true
+  healthcheck:
+    type: "http"
+    port: 8000
+    path: "/health/"
+    timeout: 30
