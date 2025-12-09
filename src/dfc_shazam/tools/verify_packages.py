@@ -5,6 +5,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from dfc_shazam.chainctl import ChainctlClient, ChainctlError
 from dfc_shazam.config import OrgSession
 from dfc_shazam.models import PackageVerificationResult
 
@@ -22,6 +23,48 @@ async def _run_docker_command(cmd: list[str], timeout: float = 120.0) -> tuple[s
     except asyncio.TimeoutError:
         proc.kill()
         return "", "Command timed out", 1
+
+
+async def _image_exists(image_ref: str, platform: str) -> bool:
+    """Check if a Docker image exists by attempting to pull it."""
+    cmd = ["docker", "pull", "--quiet", "--platform", platform, image_ref]
+    _, _, returncode = await _run_docker_command(cmd, timeout=60.0)
+    return returncode == 0
+
+
+async def _find_base_image(org: str, platform: str) -> str | None:
+    """Find a suitable base image with apk for package verification.
+
+    Tries chainguard-base first, then falls back to any available -dev image.
+
+    Args:
+        org: Organization name
+        platform: Docker platform (e.g., "linux/amd64")
+
+    Returns:
+        Full image reference (e.g., "cgr.dev/org/chainguard-base:latest") or None
+    """
+    # Try chainguard-base first (preferred - minimal base with apk)
+    base_image = f"cgr.dev/{org}/chainguard-base:latest"
+    if await _image_exists(base_image, platform):
+        return base_image
+
+    # Fallback: find any image with a -dev tag
+    try:
+        client = ChainctlClient()
+        images = await client.list_images(org=org)
+
+        # Look for any image - we'll use its latest-dev tag
+        for image in images:
+            if image.name:
+                dev_image = f"cgr.dev/{org}/{image.name}:latest-dev"
+                if await _image_exists(dev_image, platform):
+                    return dev_image
+
+    except ChainctlError:
+        pass
+
+    return None
 
 
 async def verify_apk_packages(
@@ -68,12 +111,19 @@ async def verify_apk_packages(
     # Map arch to docker platform
     platform = "linux/amd64" if arch == "x86_64" else "linux/arm64"
 
+    # Find a suitable base image with apk
+    base_image = await _find_base_image(org, platform)
+    if base_image is None:
+        return PackageVerificationResult(
+            success=False,
+            packages=packages,
+            message=f"No suitable base image found in organization '{org}'. "
+            "Need chainguard-base or any image with a -dev variant that includes apk.",
+        )
+
     # Build the apk add command with --simulate for dry-run (faster, no actual install)
     pkg_list = " ".join(packages)
     install_cmd = f"apk update && apk add --no-cache --simulate {pkg_list}"
-
-    # Use chainguard-base from the selected org
-    base_image = f"cgr.dev/{org}/chainguard-base:latest"
 
     cmd = [
         "docker", "run", "--rm",

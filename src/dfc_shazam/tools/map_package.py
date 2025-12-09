@@ -223,13 +223,14 @@ async def map_package(
 ) -> PackageMappingBatchResult:
     """Map package names from apt/yum to their APK (Wolfi) equivalents.
 
-    Uses fuzzy matching against the Wolfi APK package index to find the best
-    matching package(s). Returns scored matches ordered by relevance.
+    Uses fuzzy matching against both the Wolfi APK package index and
+    Chainguard extras repository to find the best matching package(s).
+    Returns scored matches ordered by relevance.
 
     Accepts a list of packages to map in a single call for efficiency.
     """
     try:
-        index = await WolfiAPKIndex.load(arch="x86_64")
+        index = await WolfiAPKIndex.load(arch="x86_64", include_extras=True)
     except Exception as e:
         return PackageMappingBatchResult(
             source_distro=source_distro,

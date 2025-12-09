@@ -30,6 +30,7 @@ class WolfiAPKIndex:
     """Parser and searcher for Wolfi APK package index."""
 
     BASE_URL = "https://packages.wolfi.dev/os"
+    CHAINGUARD_EXTRAS_URL = "https://packages.cgr.dev/extras"
 
     # Class-level cache
     _cache: dict[str, tuple[float, "WolfiAPKIndex"]] = {}
@@ -47,30 +48,43 @@ class WolfiAPKIndex:
                 self._provides_index[provides].append(pkg)
 
     @classmethod
-    async def load(cls, arch: str = "x86_64") -> "WolfiAPKIndex":
+    async def load(cls, arch: str = "x86_64", include_extras: bool = False) -> "WolfiAPKIndex":
         """Download and parse the APK index.
 
         Args:
             arch: Architecture (x86_64 or aarch64)
+            include_extras: If True, also load packages from Chainguard extras repo
 
         Returns:
             WolfiAPKIndex instance with parsed packages
         """
         # Check cache
-        cache_key = arch
+        cache_key = f"{arch}:extras={include_extras}"
         if cache_key in cls._cache:
             cached_time, cached_index = cls._cache[cache_key]
             if time.time() - cached_time < settings.apk_cache_ttl_seconds:
                 return cached_index
 
-        url = f"{cls.BASE_URL}/{arch}/APKINDEX.tar.gz"
+        urls = [f"{cls.BASE_URL}/{arch}/APKINDEX.tar.gz"]
+        if include_extras:
+            urls.append(f"{cls.CHAINGUARD_EXTRAS_URL}/{arch}/APKINDEX.tar.gz")
+
+        all_packages: list[APKPackage] = []
 
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=30.0)
-            response.raise_for_status()
+            for url in urls:
+                try:
+                    response = await client.get(url, timeout=30.0)
+                    response.raise_for_status()
+                    packages = cls._parse_index(response.content, arch)
+                    all_packages.extend(packages)
+                except httpx.HTTPError:
+                    # If extras fails, continue with what we have
+                    if url != urls[0]:
+                        continue
+                    raise
 
-        packages = cls._parse_index(response.content, arch)
-        index = cls(packages, arch)
+        index = cls(all_packages, arch)
 
         # Cache the result
         cls._cache[cache_key] = (time.time(), index)

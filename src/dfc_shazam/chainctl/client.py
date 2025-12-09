@@ -77,10 +77,15 @@ class ChainctlClient:
             self._chainctl_path = path
         return self._chainctl_path
 
-    async def _run_command(self, args: list[str]) -> dict | list:
+    async def _run_command(
+        self, args: list[str], timeout: float | None = None
+    ) -> dict | list:
         """Run a chainctl command and return JSON output."""
         chainctl = self._get_chainctl_path()
         cmd = [chainctl, *args, "--output", "json"]
+
+        if timeout is None:
+            timeout = settings.chainctl_timeout_seconds
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -90,7 +95,7 @@ class ChainctlClient:
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
-                timeout=settings.chainctl_timeout_seconds,
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             raise ChainctlError(f"chainctl command timed out: {' '.join(cmd)}")
@@ -130,32 +135,44 @@ class ChainctlClient:
 
         return AuthStatus(valid=valid, email=email, organizations=organizations)
 
-    async def list_images(self, repo: str | None = None, public: bool = True) -> list[ImageInfo]:
+    async def list_images(
+        self, repo: str | None = None, org: str | None = None, public: bool = False
+    ) -> list[ImageInfo]:
         """List available Chainguard images.
 
         Args:
             repo: Optional repository name to filter by
-            public: If True, list public images (default)
+            org: Organization name to list images from (uses --parent flag)
+            public: If True, list public images (default False)
 
         Returns:
             List of ImageInfo objects
         """
         args = ["images", "list"]
-        if public:
+        if org:
+            args.extend(["--parent", org])
+        elif public:
             args.append("--public")
         if repo:
             args.extend(["--repo", repo])
 
-        result = await self._run_command(args)
+        # Use longer timeout for listing images (can be slow with large catalogs)
+        result = await self._run_command(args, timeout=120.0)
 
         images = []
         if isinstance(result, list):
             for item in result:
                 if isinstance(item, dict):
+                    # Handle nested structure: item.repo.name
+                    repo_data = item.get("repo", {})
+                    if isinstance(repo_data, dict):
+                        name = repo_data.get("name", "")
+                    else:
+                        name = item.get("name", "")
                     images.append(
                         ImageInfo(
-                            name=item.get("name", ""),
-                            repo=item.get("repo", item.get("name", "")),
+                            name=name,
+                            repo=name,
                         )
                     )
         return images

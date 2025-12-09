@@ -26,7 +26,8 @@ async def search_apk_packages(
 ) -> APKSearchResult:
     """Search the Wolfi APK package index for packages.
 
-    Searches by package names/descriptions, commands, or shared libraries.
+    Searches both the Wolfi APK index and Chainguard extras repository
+    by package names/descriptions, commands, or shared libraries.
     Results ordered by relevance: exact matches first, then prefix, then substring.
 
     Examples:
@@ -44,7 +45,7 @@ async def search_apk_packages(
         )
 
     try:
-        index = await WolfiAPKIndex.load(arch=arch)
+        index = await WolfiAPKIndex.load(arch=arch, include_extras=True)
     except Exception as e:
         return APKSearchResult(
             query=query,
