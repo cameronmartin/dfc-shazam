@@ -8,7 +8,7 @@ dfc-shazam provides AI assistants with tools to help convert Dockerfiles to use 
 
 - **Image lookup**: Find Chainguard equivalents for Docker Hub images (includes organization and variant selection)
 - **Migration instructions**: Get best practices, entrypoint guidance, and user/permission documentation
-- **Package mapping**: Map apt/yum package names to APK equivalents (uses builtin mappings from [dfc](https://github.com/chainguard-dev/dfc) with fuzzy search fallback)
+- **Package mapping**: Map apt/yum package names to APK equivalents (uses builtin mappings from [dfc](https://github.com/chainguard-dev/dfc) with fuzzy search fallback against Wolfi APK index and Chainguard extras repository)
 - **Package validation**: Verify APK packages install correctly before editing Dockerfiles
 
 ## Prerequisites
@@ -101,6 +101,11 @@ Find Chainguard equivalents for Docker Hub images. Handles organization selectio
 - `organization` (optional): Chainguard organization name
 - `variant` (optional): "distroless", "slim", or "dev"
 
+**Behavior:**
+- Auto-selects organization if only one is available
+- Returns organization list for user selection if multiple are available
+- Returns variant capabilities (shell/apk availability) for user selection
+
 **Tag Matching Features:**
 - Matches versioned tags with prefixes (e.g., `adoptium-openjdk-17`)
 - JDK-aware matching: `maven:3.8-eclipse-temurin-17` correctly matches `3.8-jdk17-dev`, not `3.8-jdk11-dev`
@@ -108,21 +113,26 @@ Find Chainguard equivalents for Docker Hub images. Handles organization selectio
 
 ### get_migration_instructions_for_chainguard_image
 
-Get comprehensive migration guidance for a Chainguard image.
+Verify an image:tag exists and get comprehensive migration guidance.
 
 **Parameters:**
 - `image_reference` (required): Full image reference (e.g., "cgr.dev/{org}/python:3.12")
 
+**Prerequisite:** Call `find_equivalent_chainguard_image` first to select an organization and determine the appropriate image:tag.
+
 **Returns:**
-- Image configuration (entrypoint, cmd, user, shell/apk availability)
+- Image digest (verifies the image exists)
+- Image configuration (entrypoint, cmd, user, workdir, env, shell/apk availability)
 - Entrypoint guidance and compatibility notes
 - User/permission guidance (critical for non-root containers)
 - Conversion tips and best practices
+- Container filesystem tree (if Docker is available)
+- Available users from /etc/passwd
 - Linked documentation from edu.chainguard.dev
 
 ### find_equivalent_apk_packages
 
-Map apt/yum package names to APK equivalents. Uses builtin mappings from [dfc](https://github.com/chainguard-dev/dfc) with fuzzy search fallback.
+Map apt/yum package names to APK equivalents. Uses builtin mappings from [dfc](https://github.com/chainguard-dev/dfc) with fuzzy search fallback against the Wolfi APK index and Chainguard extras repository.
 
 **Parameters:**
 - `packages` (required): List of package names (e.g., `["libssl-dev", "build-essential"]`)
@@ -130,15 +140,22 @@ Map apt/yum package names to APK equivalents. Uses builtin mappings from [dfc](h
 
 **Mapping Sources:**
 1. Builtin mappings (vendored from dfc) - exact matches
-2. Fuzzy search against Wolfi APK index - for packages not in builtin mappings
+2. Fuzzy search against Wolfi APK index and Chainguard extras repository - for packages not in builtin mappings
 
 ### validate_apk_packages_install
 
-Verify APK packages install correctly using a dry-run simulation.
+Verify APK packages install correctly using a dry-run simulation (`apk add --simulate`).
 
 **Parameters:**
 - `packages` (required): List of APK package names to verify
 - `arch` (optional): "x86_64" (default) or "aarch64"
+
+**Prerequisite:** Call `find_equivalent_chainguard_image` first to select an organization.
+
+**Behavior:**
+- Uses `chainguard-base:latest` if available, otherwise falls back to any available `-dev` image
+- Runs `apk add --simulate` (dry-run) which is faster than actual installation
+- Returns which packages succeeded/failed with error details
 
 **Important:** Always validate packages before editing Dockerfiles. Package mappings are suggestions that may be incorrect.
 
@@ -156,7 +173,7 @@ Builtin mappings are vendored from [chainguard-dev/dfc](https://github.com/chain
 | ssh | openssh-client, openssh-server |
 | ... | ... |
 
-Packages not in builtin mappings fall back to fuzzy search against the Wolfi APK index.
+Packages not in builtin mappings fall back to fuzzy search against the Wolfi APK index and Chainguard extras repository.
 
 ## Image Mappings
 
