@@ -50,3 +50,4 @@ htmlcov/
 # Local config (contains machine-specific paths)
 .mcp.json
 .claude/
+vendor/

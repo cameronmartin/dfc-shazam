@@ -99,8 +99,8 @@ RUN apt-get update && apt-get install -y curl
 
         # Check that image lookup was called
         tool_names = [call["tool"] for call in result.mcp_calls]
-        assert "lookup_chainguard_image" in tool_names
-        assert "map_package" in tool_names
+        assert "find_equivalent_chainguard_image" in tool_names
+        assert "find_equivalent_apk_packages" in tool_names
 
     @pytest.mark.asyncio
     async def test_convert_no_packages(self, converter):

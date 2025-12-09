@@ -1,12 +1,56 @@
 """Tool for mapping package names from apt/yum to APK."""
 
 import re
+from pathlib import Path
 from typing import Annotated, Literal
 
+import yaml
 from pydantic import Field
 
 from dfc_shazam.apk import WolfiAPKIndex
 from dfc_shazam.models import PackageMatch, PackageMappingBatchResult, PackageMappingResult
+
+# Load builtin mappings from dfc (vendored from https://github.com/chainguard-dev/dfc)
+_MAPPINGS_FILE = Path(__file__).parent.parent / "builtin-mappings.yaml"
+_BUILTIN_MAPPINGS: dict | None = None
+
+
+def _load_builtin_mappings() -> dict:
+    """Load and cache the builtin package mappings from dfc."""
+    global _BUILTIN_MAPPINGS
+    if _BUILTIN_MAPPINGS is None:
+        with open(_MAPPINGS_FILE) as f:
+            _BUILTIN_MAPPINGS = yaml.safe_load(f)
+    return _BUILTIN_MAPPINGS
+
+
+def _lookup_builtin_mapping(package: str, source_distro: str) -> list[str] | None:
+    """Look up a package in the builtin mappings.
+
+    Returns a list of APK package names if found, None otherwise.
+    """
+    mappings = _load_builtin_mappings()
+    packages_section = mappings.get("packages", {})
+
+    # Determine which distro mappings to check
+    distros_to_check: list[str] = []
+    if source_distro == "apt":
+        distros_to_check = ["debian"]
+    elif source_distro in ("yum", "dnf"):
+        distros_to_check = ["fedora"]
+    else:  # auto - check all
+        distros_to_check = ["debian", "fedora"]
+
+    for distro in distros_to_check:
+        distro_mappings = packages_section.get(distro, {})
+        if package in distro_mappings:
+            result = distro_mappings[package]
+            # Handle empty list (package should be dropped) vs list of replacements
+            if result is None or result == []:
+                return []  # Package has no equivalent / should be dropped
+            return result
+
+    return None  # Not found in builtin mappings
 
 
 def _levenshtein_distance(s1: str, s2: str) -> int:
@@ -141,7 +185,38 @@ def _map_single_package(
     """Map a single package name to its APK equivalent.
 
     Internal function used by map_package for batch processing.
+    First checks builtin mappings from dfc, then falls back to fuzzy search.
     """
+    # First, check builtin mappings from dfc
+    builtin_result = _lookup_builtin_mapping(package, source_distro)
+    if builtin_result is not None:
+        if not builtin_result:  # Empty list - package should be dropped
+            return PackageMappingResult(
+                source_package=package,
+                source_distro=source_distro,
+                matches=[],
+                message=f"Package '{package}' has no APK equivalent (can be safely removed).",
+            )
+        # Found in builtin mappings - return all mapped packages
+        matches = [
+            PackageMatch(
+                apk_package=apk_pkg,
+                matched_name=apk_pkg,
+                score=1.0,
+                description=f"Builtin mapping from {package}",
+            )
+            for apk_pkg in builtin_result
+        ]
+        apk_list = " ".join(builtin_result)
+        return PackageMappingResult(
+            source_package=package,
+            source_distro=source_distro,
+            matches=matches,
+            best_match=builtin_result[0],
+            message=f"Builtin mapping: {package} → {apk_list}",
+        )
+
+    # Fall back to fuzzy search against APK index
     normalized = _normalize_package_name(package, source_distro)
 
     # Get candidate packages using cheap operations first
@@ -209,7 +284,7 @@ def _map_single_package(
     )
 
 
-async def map_package(
+async def find_equivalent_apk_packages(
     packages: Annotated[
         list[str],
         Field(description="List of source package names (e.g., ['libssl-dev', 'build-essential', 'curl'])"),

@@ -5,17 +5,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from dfc_shazam.models import (
-    APKSearchResult,
     ChainguardImageResult,
-    ImageVerificationResult,
+    MigrationInstructionsResult,
     PackageMatch,
     PackageMappingBatchResult,
     PackageMappingResult,
 )
-from dfc_shazam.tools.lookup_image import lookup_chainguard_image
-from dfc_shazam.tools.map_package import map_package
-from dfc_shazam.tools.search_packages import search_apk_packages
-from dfc_shazam.tools.verify_tag import verify_image_tag
+from dfc_shazam.tools.find_equiv_cgr_image import find_equivalent_chainguard_image
+from dfc_shazam.tools.image_docs import get_migration_instructions_for_chainguard_image
+from dfc_shazam.tools.map_package import find_equivalent_apk_packages
 
 
 @dataclass
@@ -167,12 +165,12 @@ class MCPTestClient:
         """
         args = {"source_image": source_image}
         return await self._call_with_tracking(
-            "lookup_chainguard_image",
+            "find_equivalent_chainguard_image",
             args,
-            lookup_chainguard_image(source_image),
+            find_equivalent_chainguard_image(source_image),
         )
 
-    async def map_package(
+    async def find_equivalent_apk_packages(
         self,
         packages: list[str],
         source_distro: str = "auto",
@@ -188,48 +186,27 @@ class MCPTestClient:
         """
         args = {"packages": packages, "source_distro": source_distro}
         return await self._call_with_tracking(
-            "map_package",
+            "find_equivalent_apk_packages",
             args,
-            map_package(packages, source_distro),  # type: ignore
+            find_equivalent_apk_packages(packages, source_distro),  # type: ignore
         )
 
-    async def search_packages(
-        self,
-        query: str,
-        arch: str = "x86_64",
-        limit: int = 20,
-    ) -> APKSearchResult:
-        """Search APK packages.
-
-        Args:
-            query: Search query
-            arch: Architecture
-            limit: Result limit
-
-        Returns:
-            APKSearchResult
-        """
-        args = {"query": query, "arch": arch, "limit": limit}
-        return await self._call_with_tracking(
-            "search_apk_packages",
-            args,
-            search_apk_packages(query, arch, limit),
-        )
-
-    async def verify_tag(self, image_reference: str) -> ImageVerificationResult:
-        """Verify image tag exists.
+    async def get_migration_instructions(
+        self, image_reference: str
+    ) -> MigrationInstructionsResult:
+        """Get migration instructions for a Chainguard image.
 
         Args:
             image_reference: Full image reference
 
         Returns:
-            ImageVerificationResult
+            MigrationInstructionsResult
         """
         args = {"image_reference": image_reference}
         return await self._call_with_tracking(
-            "verify_image_tag",
+            "get_migration_instructions_for_chainguard_image",
             args,
-            verify_image_tag(image_reference),
+            get_migration_instructions_for_chainguard_image(image_reference),
         )
 
     def get_session(self) -> MCPSession:
@@ -250,7 +227,6 @@ class MockMCPClient(MCPTestClient):
         self.image_mappings: dict[str, str] = {}
         self.package_mappings: dict[str, list[str]] = {}
         self.verified_images: set[str] = set()
-        self.apk_packages: list[str] = []
 
     async def lookup_image(self, source_image: str) -> ChainguardImageResult:
         """Mock image lookup.
@@ -263,6 +239,7 @@ class MockMCPClient(MCPTestClient):
         """
         # Extract base name without tag
         base_name = source_image.split(":")[0].split("/")[-1]
+        original_tag = source_image.split(":")[-1] if ":" in source_image else "latest"
 
         if base_name in self.image_mappings:
             cg_image = self.image_mappings[base_name]
@@ -270,12 +247,12 @@ class MockMCPClient(MCPTestClient):
                 found=True,
                 source_image=source_image,
                 chainguard_image=f"cgr.dev/chainguard/{cg_image}",
-                available_tags=["latest", "latest-dev"],
-                variants={
-                    "latest": ["latest"],
-                    "dev": ["latest-dev"],
-                    "versioned": [],
-                },
+                chainguard_image_name=cg_image,
+                original_tag=original_tag,
+                matched_tag="latest",
+                full_image_ref=f"cgr.dev/chainguard/{cg_image}:latest",
+                variant="distroless",
+                available_variants=["distroless", "dev"],
                 recommendation=f"Use cgr.dev/chainguard/{cg_image}:latest",
             )
         else:
@@ -286,14 +263,14 @@ class MockMCPClient(MCPTestClient):
             )
 
         self.session.record(
-            tool="lookup_chainguard_image",
+            tool="find_equivalent_chainguard_image",
             args={"source_image": source_image},
             result=result,
             success=True,
         )
         return result
 
-    async def map_package(
+    async def find_equivalent_apk_packages(
         self,
         packages: list[str],
         source_distro: str = "auto",
@@ -345,78 +322,40 @@ class MockMCPClient(MCPTestClient):
         )
 
         self.session.record(
-            tool="map_package",
+            tool="find_equivalent_apk_packages",
             args={"packages": packages, "source_distro": source_distro},
             result=batch_result,
             success=True,
         )
         return batch_result
 
-    async def verify_tag(self, image_reference: str) -> ImageVerificationResult:
-        """Mock tag verification.
+    async def get_migration_instructions(
+        self, image_reference: str
+    ) -> MigrationInstructionsResult:
+        """Mock migration instructions lookup.
 
         Args:
-            image_reference: Image reference to verify
+            image_reference: Image reference to get instructions for
 
         Returns:
-            Mocked ImageVerificationResult
+            Mocked MigrationInstructionsResult
         """
         exists = image_reference in self.verified_images
-        result = ImageVerificationResult(
+        # Extract image name from reference
+        image_name = image_reference.split("/")[-1].split(":")[0]
+
+        result = MigrationInstructionsResult(
             exists=exists,
             image_reference=image_reference,
             digest="sha256:mock123456789" if exists else None,
+            image_name=image_name,
+            conversion_tips=["Mock conversion tip"],
             message=None if exists else "Image not found",
         )
 
         self.session.record(
-            tool="verify_image_tag",
+            tool="get_migration_instructions_for_chainguard_image",
             args={"image_reference": image_reference},
-            result=result,
-            success=True,
-        )
-        return result
-
-    async def search_packages(
-        self,
-        query: str,
-        arch: str = "x86_64",
-        limit: int = 20,
-    ) -> APKSearchResult:
-        """Mock package search.
-
-        Args:
-            query: Search query
-            arch: Architecture
-            limit: Result limit
-
-        Returns:
-            Mocked APKSearchResult
-        """
-        from dfc_shazam.models import APKPackageInfo
-
-        # Return mock packages that match the query
-        matching = [p for p in self.apk_packages if query.lower() in p.lower()][:limit]
-        packages = [
-            APKPackageInfo(
-                name=p,
-                version="1.0.0-r0",
-                description=f"Mock package {p}",
-                architecture=arch,
-            )
-            for p in matching
-        ]
-
-        result = APKSearchResult(
-            query=query,
-            arch=arch,
-            packages=packages,
-            total_count=len(packages),
-        )
-
-        self.session.record(
-            tool="search_apk_packages",
-            args={"query": query, "arch": arch, "limit": limit},
             result=result,
             success=True,
         )
@@ -487,25 +426,3 @@ class MockMCPClient(MCPTestClient):
             "cgr.dev/chainguard/chainguard-base:latest-dev",
             "cgr.dev/chainguard/static:latest",
         }
-
-        self.apk_packages = [
-            "python-3",
-            "python-3-dev",
-            "py3-pip",
-            "nodejs",
-            "npm",
-            "go",
-            "rust",
-            "gcc",
-            "g++",
-            "make",
-            "cmake",
-            "openssl",
-            "openssl-dev",
-            "curl",
-            "wget",
-            "git",
-            "postgresql-dev",
-            "libpq-dev",
-            "build-base",
-        ]

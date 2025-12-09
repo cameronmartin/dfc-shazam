@@ -3,6 +3,26 @@
 from pydantic import BaseModel, Field
 
 
+class VariantCapabilities(BaseModel):
+    """Actual capabilities of a variant determined by image inspection."""
+
+    variant: str = Field(description="Variant name: 'distroless', 'slim', or 'dev'")
+    has_shell: bool = Field(description="True if shell (/bin/sh, bash, busybox) is available")
+    has_apk: bool = Field(description="True if apk package manager is available")
+    probed_tag: str | None = Field(
+        default=None,
+        description="The tag that was probed to determine these capabilities",
+    )
+    description: str = Field(
+        default="",
+        description="Human-readable description of this variant's use case",
+    )
+    recommended_for: str | None = Field(
+        default=None,
+        description="Use case this variant is recommended for: 'production', 'development', or None",
+    )
+
+
 class ChainguardImageResult(BaseModel):
     """Result of Chainguard image lookup."""
 
@@ -11,8 +31,7 @@ class ChainguardImageResult(BaseModel):
     chainguard_image: str | None = None
     chainguard_image_name: str | None = Field(
         default=None,
-        description="Just the image name (e.g., 'amazon-corretto-jdk') without registry prefix. "
-        "Use this value when calling lookup_tag.",
+        description="Just the image name (e.g., 'amazon-corretto-jdk') without registry prefix.",
     )
     recommendation: str | None = None
     message: str | None = None
@@ -20,6 +39,32 @@ class ChainguardImageResult(BaseModel):
         default=False,
         description="True if source is a generic base image (Ubuntu, Alpine, UBI, etc.). "
         "For these, re-search with the workload type (e.g., 'python', 'node', 'jdk').",
+    )
+    # Tag and variant fields (populated after variant selection)
+    original_tag: str | None = Field(
+        default=None,
+        description="The tag parsed from the source image (e.g., '3.12' from 'python:3.12').",
+    )
+    matched_tag: str | None = Field(
+        default=None,
+        description="The best matching Chainguard tag for the requested variant.",
+    )
+    full_image_ref: str | None = Field(
+        default=None,
+        description="Full image reference with tag (e.g., 'cgr.dev/org/python:3.12'). "
+        "Use this value when calling get_migration_instructions_for_chainguard_image.",
+    )
+    variant: str | None = Field(
+        default=None,
+        description="The selected variant: 'distroless', 'slim', or 'dev'.",
+    )
+    available_variants: list[str] = Field(
+        default_factory=list,
+        description="Available variants for this image (e.g., ['distroless', 'slim', 'dev']).",
+    )
+    variant_capabilities: list[VariantCapabilities] = Field(
+        default_factory=list,
+        description="Actual shell/apk capabilities for each variant, determined by image inspection.",
     )
 
 
@@ -211,7 +256,7 @@ class TagLookupResult(BaseModel):
     full_image_ref: str | None = Field(
         default=None,
         description="Full image reference (e.g., 'cgr.dev/org/python:3.12'). "
-        "Use this value when calling verify_image_tag.",
+        "Use this value when calling get_migration_instructions_for_chainguard_image.",
     )
     available_tags: list[str] = Field(default_factory=list)
     variant: str | None = Field(
@@ -222,4 +267,63 @@ class TagLookupResult(BaseModel):
         default=False,
         description="True if -slim tags are available for this image",
     )
+    variant_capabilities: list[VariantCapabilities] = Field(
+        default_factory=list,
+        description="Actual shell/apk capabilities for each variant, determined by image inspection. "
+        "Use this to understand what each variant can do instead of relying on static descriptions.",
+    )
     message: str | None = None
+
+
+class MigrationInstructionsResult(BaseModel):
+    """Result of migration instructions lookup for a Chainguard image."""
+
+    # Verification info (from verify_tag)
+    exists: bool = Field(description="Whether the image:tag exists in the registry")
+    image_reference: str = Field(description="Full image reference that was checked")
+    digest: str | None = Field(
+        default=None, description="Image digest if found"
+    )
+    config: ImageConfig | None = Field(
+        default=None,
+        description="Container configuration (entrypoint, user, shell availability, etc.)",
+    )
+    entrypoint_guidance: str | None = Field(
+        default=None,
+        description="Guidance about entrypoint configuration and differences from original images",
+    )
+
+    # Overview info (from get_image_overview)
+    image_name: str | None = Field(
+        default=None, description="Base image name (e.g., 'python', 'node')"
+    )
+    overview_url: str | None = Field(
+        default=None, description="URL to the image's documentation page"
+    )
+    user_guidance: str | None = Field(
+        default=None,
+        description="Critical guidance about container users, ownership, and required Dockerfile changes",
+    )
+    conversion_tips: list[str] = Field(
+        default_factory=list,
+        description="General Dockerfile conversion tips applicable to all images",
+    )
+    available_users: list[ContainerUserInfo] = Field(
+        default_factory=list,
+        description="Users available in the container image (from /etc/passwd)",
+    )
+    filesystem_tree: str | None = Field(
+        default=None,
+        description="Container directory tree showing ownership and permissions",
+    )
+    overview_text: str | None = Field(
+        default=None, description="Overview text from documentation"
+    )
+    best_practices: list[LinkedDocContent] = Field(
+        default_factory=list,
+        description="Content fetched from best practices and getting started links",
+    )
+
+    message: str | None = Field(
+        default=None, description="Additional messages or warnings"
+    )

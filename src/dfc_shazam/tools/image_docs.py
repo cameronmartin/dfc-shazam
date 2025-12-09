@@ -9,8 +9,15 @@ import httpx
 from pydantic import Field
 
 from dfc_shazam.config import OrgSession
+from dfc_shazam.chainctl import ChainctlClient, ChainctlError
 from dfc_shazam.mappings.images import lookup_chainguard_image
-from dfc_shazam.models import ContainerUserInfo, ImageOverviewResult, LinkedDocContent
+from dfc_shazam.models import (
+    ContainerUserInfo,
+    ImageConfig,
+    ImageOverviewResult,
+    LinkedDocContent,
+    MigrationInstructionsResult,
+)
 
 # Version for user agent - should match pyproject.toml
 VERSION = "0.1.0"
@@ -23,10 +30,16 @@ CHAINGUARD_IMAGES_BASE = "https://images.chainguard.dev"
 # Timeout for Docker operations (pull + run)
 DOCKER_TIMEOUT_SECONDS = 120.0
 
+# Maximum characters for best practices content per document
+MAX_DOC_CONTENT_CHARS = 10000
+
+# Maximum lines for filesystem tree
+MAX_FILESYSTEM_TREE_LINES = 50
+
 # Static conversion tips returned with every get_image_overview call
 CONVERSION_TIPS = [
     "Review any `curl | sh` or `wget` commands that download and install software - "
-    "check if there's a Wolfi APK package available instead using search_apk_packages. "
+    "check if there's a Wolfi APK package available instead using find_equivalent_apk_packages. "
     "Installing via apk is more secure and maintainable.",
     "Replace `apt-get`, `yum`, or `dnf` package installs with `apk add --no-cache`. "
     "Use map_package to find APK equivalents for packages.",
@@ -228,8 +241,11 @@ REQUIRED Dockerfile changes:
   ```
   USER root
   RUN apk add --no-cache <packages>
-  USER {user.username}
+  USER {user.username}  # ⚠️ IMMEDIATELY drop back to non-root!
   ```
+
+🚨 CRITICAL: After ANY `apk add` command, you MUST add `USER {user.username}` on the VERY NEXT LINE.
+   Never leave subsequent instructions running as root - this is a security vulnerability.
 
 COMMON PITFALLS:
 - COPY without --chown creates root-owned files that are inaccessible
@@ -341,6 +357,10 @@ async def _fetch_doc_content(
         if not content or len(content) < 50:
             return None
 
+        # Truncate content to avoid bloating response
+        if len(content) > MAX_DOC_CONTENT_CHARS:
+            content = content[:MAX_DOC_CONTENT_CHARS] + "\n\n[Content truncated. See full documentation at URL.]"
+
         return LinkedDocContent(url=url, title=title, content=content)
 
     except (httpx.TimeoutException, httpx.RequestError):
@@ -419,17 +439,12 @@ async def get_image_overview(
         ),
     ],
 ) -> ImageOverviewResult:
-    """Get overview text for a Chainguard image from images.chainguard.dev.
+    """Get overview and best practices for a Chainguard image.
 
-    Fetches the overview page and extracts the main text content describing
-    the image, its usage, and key information. Also follows links to best
-    practices, getting started guides, and other relevant documentation,
-    returning their content as well.
+    Returns user_guidance (critical ownership/user info), conversion_tips,
+    and documentation from images.chainguard.dev.
 
-    Accepts various image reference formats:
-    - Simple names: python, node, nginx
-    - Full references: cgr.dev/{org}/python:latest
-    - Other registries: registry.access.redhat.com/ubi9/ubi-minimal (will lookup Chainguard equivalent)
+    Accepts simple names ('python') or full references ('cgr.dev/{org}/python:latest').
     """
     original_input = image_name
     image_name = _normalize_image_name(image_name)
@@ -493,6 +508,12 @@ async def get_image_overview(
                 filesystem_tree, available_users = await asyncio.gather(
                     fs_task, users_task
                 )
+
+                # Truncate filesystem tree to avoid bloating response
+                if filesystem_tree:
+                    lines = filesystem_tree.split("\n")
+                    if len(lines) > MAX_FILESYSTEM_TREE_LINES:
+                        filesystem_tree = "\n".join(lines[:MAX_FILESYSTEM_TREE_LINES]) + f"\n\n[Truncated {len(lines) - MAX_FILESYSTEM_TREE_LINES} additional entries]"
 
             # Generate actionable user guidance based on detected users
             user_guidance = _generate_user_guidance(available_users)
@@ -606,3 +627,270 @@ def _html_to_text(html: str) -> str:
     html = re.sub(r"\n\s*\n\s*\n+", "\n\n", html)
 
     return html.strip()
+
+
+# ============================================================================
+# Image verification and migration instructions (consolidated from verify_tag.py)
+# ============================================================================
+
+
+def _generate_entrypoint_guidance(config: ImageConfig, image_reference: str) -> str:
+    """Generate guidance about the image's entrypoint configuration.
+
+    Provides both specific details about the actual entrypoint/cmd values
+    and general best practices for working with the image.
+    """
+    lines = ["ENTRYPOINT CONFIGURATION:"]
+
+    # Part 1: Specific details
+    if config.entrypoint:
+        lines.append(f"  Entrypoint: {config.entrypoint}")
+    else:
+        lines.append("  Entrypoint: None (not set)")
+
+    if config.cmd:
+        lines.append(f"  Cmd: {config.cmd}")
+    else:
+        lines.append("  Cmd: None (not set)")
+
+    if config.user:
+        lines.append(f"  User: {config.user}")
+
+    lines.append(f"  Shell available: {'Yes' if config.has_shell else 'No'}")
+    lines.append(f"  Apk available: {'Yes' if config.has_apk else 'No'}")
+
+    # Part 2: Guidance based on configuration
+    lines.append("")
+    lines.append("GUIDANCE:")
+
+    if config.entrypoint:
+        lines.append(f"- This image has ENTRYPOINT {config.entrypoint}")
+        lines.append("- Any CMD you set will be passed as arguments to the entrypoint")
+        lines.append("- Review the user_guidance field for image-specific usage patterns and best practices")
+    else:
+        lines.append("- This image has NO entrypoint set")
+        lines.append("- CMD will be executed directly as the container command")
+        lines.append("- You may need to set ENTRYPOINT in your Dockerfile")
+
+    # Shell availability guidance
+    if not config.has_shell:
+        lines.append("- This is a distroless image - shell-form commands will NOT work")
+        lines.append("- Use exec form: CMD [\"executable\", \"arg1\"] not CMD \"executable arg1\"")
+    else:
+        lines.append("- Shell is available - both exec form and shell form commands will work")
+
+    # General reminder
+    lines.append("- IMPORTANT: Compare with your original image's entrypoint to ensure compatible behavior")
+
+    return "\n".join(lines)
+
+
+async def _get_crane_config(image_reference: str) -> ImageConfig | None:
+    """Get image configuration using crane config.
+
+    Returns ImageConfig with entrypoint, cmd, user, workdir, env, and shell/apk availability.
+    Uses the cached probe_image_capabilities function to avoid duplicate crane export calls.
+    """
+    from dfc_shazam.tools.lookup_tag import probe_image_capabilities
+    import json
+
+    crane_path = shutil.which("crane")
+    if crane_path is None:
+        return None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            crane_path, "config", image_reference,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+
+        if proc.returncode != 0:
+            return None
+
+        config_data = json.loads(stdout.decode())
+        container_config = config_data.get("config", {})
+
+        # Extract basic config
+        entrypoint = container_config.get("Entrypoint")
+        cmd = container_config.get("Cmd")
+        user = container_config.get("User")
+        workdir = container_config.get("WorkingDir")
+        env = container_config.get("Env", [])
+
+        # Use cached probing function for shell/apk availability
+        has_shell = False
+        has_apk = False
+        capabilities = await probe_image_capabilities(image_reference)
+        if capabilities:
+            has_shell, has_apk = capabilities
+
+        return ImageConfig(
+            entrypoint=entrypoint,
+            cmd=cmd,
+            user=user,
+            workdir=workdir,
+            env=env,
+            has_shell=has_shell,
+            has_apk=has_apk,
+        )
+
+    except (asyncio.TimeoutError, json.JSONDecodeError, Exception):
+        return None
+
+
+async def get_migration_instructions_for_chainguard_image(
+    image_reference: Annotated[
+        str,
+        Field(
+            description="Full Chainguard image reference (e.g., 'cgr.dev/{org}/python:3.12', 'cgr.dev/{org}/node:22-slim')"
+        ),
+    ],
+) -> MigrationInstructionsResult:
+    """Get migration instructions for a Chainguard image.
+
+    Verifies the image:tag exists and returns comprehensive migration guidance including:
+    - Image digest and configuration (entrypoint, user, shell/apk availability)
+    - User guidance (critical ownership/permission info)
+    - Conversion tips and best practices
+    - Documentation links
+
+    Requires find_equivalent_chainguard_image to be called first to select an organization
+    and determine the appropriate image:tag.
+    """
+    org = OrgSession.get_org()
+    if org is None:
+        return MigrationInstructionsResult(
+            exists=False,
+            image_reference=image_reference,
+            message="No organization selected. Call find_equivalent_chainguard_image first to select an organization.",
+        )
+
+    # Validate it looks like a Chainguard image reference
+    if not image_reference.startswith("cgr.dev/"):
+        return MigrationInstructionsResult(
+            exists=False,
+            image_reference=image_reference,
+            message=f"Image reference must start with 'cgr.dev/'. "
+            f"Example: cgr.dev/{org}/python:3.12",
+        )
+
+    # Warn if using cgr.dev/chainguard/ instead of org
+    if image_reference.startswith("cgr.dev/chainguard/"):
+        return MigrationInstructionsResult(
+            exists=False,
+            image_reference=image_reference,
+            message=f"Do not use 'cgr.dev/chainguard/'. Use your organization: "
+            f"cgr.dev/{org}/<image>:<tag>",
+        )
+
+    # Extract image name from reference for documentation lookup
+    image_name = _normalize_image_name(image_reference)
+
+    # Step 1: Verify the image exists
+    client = ChainctlClient()
+    try:
+        result = await client.resolve_tag(image_reference)
+
+        if not result.exists:
+            return MigrationInstructionsResult(
+                exists=False,
+                image_reference=image_reference,
+                image_name=image_name,
+                message="Image or tag not found in the Chainguard registry.",
+            )
+
+        digest = result.digest
+
+    except ChainctlError as e:
+        return MigrationInstructionsResult(
+            exists=False,
+            image_reference=image_reference,
+            image_name=image_name,
+            message=f"Failed to verify image: {e}",
+        )
+
+    # Step 2: Get image configuration
+    config = await _get_crane_config(image_reference)
+    entrypoint_guidance = None
+    if config:
+        entrypoint_guidance = _generate_entrypoint_guidance(config, image_reference)
+
+    # Step 3: Fetch documentation and overview
+    overview_url = f"https://images.chainguard.dev/directory/image/{image_name}/overview"
+
+    headers = {"User-Agent": USER_AGENT}
+    async with httpx.AsyncClient(
+        timeout=30.0, follow_redirects=True, headers=headers
+    ) as http_client:
+        overview_text = None
+        best_practices: list[LinkedDocContent] = []
+
+        try:
+            response = await http_client.get(overview_url)
+
+            if response.status_code == 200:
+                html = response.text
+                overview_text = _extract_overview_text(html)
+
+                # Extract and fetch best practices links
+                doc_links = _extract_doc_links(html, image_name)
+                if doc_links:
+                    fetch_tasks = [
+                        _fetch_doc_content(http_client, url, title)
+                        for url, title in doc_links
+                    ]
+                    results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+                    for fetch_result in results:
+                        if isinstance(fetch_result, LinkedDocContent):
+                            best_practices.append(fetch_result)
+
+        except (httpx.TimeoutException, httpx.RequestError):
+            # Documentation fetch failed, continue with other info
+            overview_url = None
+
+    # Step 4: Inspect container for users and filesystem
+    filesystem_tree = None
+    available_users: list[ContainerUserInfo] = []
+
+    # Use the -dev variant for inspection if possible
+    if ":" in image_reference:
+        base_ref = image_reference.rsplit(":", 1)[0]
+        dev_image_ref = f"{base_ref}:latest-dev"
+    else:
+        dev_image_ref = f"{image_reference}:latest-dev"
+
+    # Run inspections in parallel
+    fs_task = _inspect_container_filesystem(dev_image_ref)
+    users_task = _inspect_container_users(dev_image_ref)
+    filesystem_tree, available_users = await asyncio.gather(fs_task, users_task)
+
+    # Truncate filesystem tree if too long
+    if filesystem_tree:
+        lines = filesystem_tree.split("\n")
+        if len(lines) > MAX_FILESYSTEM_TREE_LINES:
+            filesystem_tree = (
+                "\n".join(lines[:MAX_FILESYSTEM_TREE_LINES])
+                + f"\n\n[Truncated {len(lines) - MAX_FILESYSTEM_TREE_LINES} additional entries]"
+            )
+
+    # Generate user guidance
+    user_guidance = _generate_user_guidance(available_users)
+
+    return MigrationInstructionsResult(
+        exists=True,
+        image_reference=image_reference,
+        digest=digest,
+        config=config,
+        entrypoint_guidance=entrypoint_guidance,
+        image_name=image_name,
+        overview_url=overview_url,
+        user_guidance=user_guidance,
+        conversion_tips=CONVERSION_TIPS,
+        available_users=available_users,
+        filesystem_tree=filesystem_tree,
+        overview_text=overview_text,
+        best_practices=best_practices,
+    )

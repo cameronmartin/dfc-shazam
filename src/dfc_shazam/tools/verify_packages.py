@@ -67,7 +67,7 @@ async def _find_base_image(org: str, platform: str) -> str | None:
     return None
 
 
-async def verify_apk_packages(
+async def validate_apk_packages_install(
     packages: Annotated[
         list[str],
         Field(description="List of APK package names to verify (e.g., ['openssl', 'curl', 'git'])"),
@@ -83,15 +83,14 @@ async def verify_apk_packages(
     This is faster than actual installation since no packages are downloaded.
     Returns details about which packages succeeded or failed.
 
-    NOTE: You must call lookup_chainguard_image first to select an organization
-    before using this tool.
+    PREREQUISITE: Call find_equivalent_chainguard_image first to select an organization.
     """
     org = OrgSession.get_org()
     if org is None:
         return PackageVerificationResult(
             success=False,
             packages=packages,
-            message="No organization selected. Call lookup_chainguard_image first to select an organization.",
+            message="No organization selected. Call find_equivalent_chainguard_image first to select an organization.",
         )
 
     if not packages:

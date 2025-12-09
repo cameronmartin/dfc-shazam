@@ -1,35 +1,56 @@
 """Tool for looking up best matching Chainguard tag."""
 
+import asyncio
 import re
+import shutil
 from typing import Annotated
 
 from pydantic import Field
 
 from dfc_shazam.chainctl import ChainctlClient, ChainctlError
 from dfc_shazam.config import OrgSession
-from dfc_shazam.models import TagLookupResult
+from dfc_shazam.models import TagLookupResult, VariantCapabilities
+
+# Re-export for use by image_docs.py
+__all__ = ["lookup_tag", "probe_image_capabilities"]
 
 
-def _parse_version(tag: str) -> tuple[list[int], str]:
-    """Parse a version tag into numeric components and suffix.
+def _parse_version(tag: str) -> tuple[list[int], str, str]:
+    """Parse a version tag into prefix, numeric components, and suffix.
 
-    Returns tuple of (version_parts, suffix) where version_parts is a list
-    of integers and suffix is the remaining string (e.g., "-dev", "-slim").
+    Returns tuple of (version_parts, suffix, prefix) where:
+    - version_parts is a list of integers
+    - suffix is the remaining string (e.g., "-dev", "-slim")
+    - prefix is any text before the version (e.g., "adoptium-openjdk-")
 
     Examples:
-        "3.12" -> ([3, 12], "")
-        "3.12-dev" -> ([3, 12], "-dev")
-        "latest" -> ([], "latest")
-        "18-alpine" -> ([18], "-alpine")
+        "3.12" -> ([3, 12], "", "")
+        "3.12-dev" -> ([3, 12], "-dev", "")
+        "latest" -> ([], "latest", "")
+        "18-alpine" -> ([18], "-alpine", "")
+        "adoptium-openjdk-17" -> ([17], "", "adoptium-openjdk-")
+        "adoptium-openjdk-17.0.13-dev" -> ([17, 0, 13], "-dev", "adoptium-openjdk-")
+        "openjdk-17-jre" -> ([17], "-jre", "openjdk-")
     """
-    # Match version numbers at the start
+    # First try: Match version numbers at the start (standard format)
     match = re.match(r"^(\d+(?:\.\d+)*)(.*)?$", tag)
     if match:
         version_str = match.group(1)
         suffix = match.group(2) or ""
         parts = [int(p) for p in version_str.split(".")]
-        return parts, suffix
-    return [], tag
+        return parts, suffix, ""
+
+    # Second try: Find version numbers after a prefix (e.g., "adoptium-openjdk-17")
+    # Look for patterns like "prefix-N" or "prefix-N.N.N"
+    match = re.match(r"^(.+?-)(\d+(?:\.\d+)*)(.*)?$", tag)
+    if match:
+        prefix = match.group(1)
+        version_str = match.group(2)
+        suffix = match.group(3) or ""
+        parts = [int(p) for p in version_str.split(".")]
+        return parts, suffix, prefix
+
+    return [], tag, ""
 
 
 def _get_tag_variant(tag: str) -> str:
@@ -40,6 +61,38 @@ def _get_tag_variant(tag: str) -> str:
     elif "-slim" in tag_lower:
         return "slim"
     return "distroless"
+
+
+def _extract_jdk_version(tag: str) -> int | None:
+    """Extract JDK/Java version from a tag.
+
+    Recognizes patterns like:
+    - jdk17, jdk-17, jdk11
+    - temurin-17, eclipse-temurin-17
+    - openjdk-17, openjdk17
+    - corretto-17, corretto17
+    - java17, java-17
+
+    Returns the JDK version number or None if not found.
+    """
+    tag_lower = tag.lower()
+
+    # Patterns for JDK version extraction (order matters - more specific first)
+    patterns = [
+        r"(?:eclipse-)?temurin-(\d+)",  # temurin-17, eclipse-temurin-17
+        r"(?:amazon-)?corretto-?(\d+)",  # corretto-17, amazon-corretto-17
+        r"openjdk-?(\d+)",  # openjdk-17, openjdk17
+        r"jdk-?(\d+)",  # jdk17, jdk-17
+        r"jre-?(\d+)",  # jre17, jre-17
+        r"java-?(\d+)",  # java17, java-17
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, tag_lower)
+        if match:
+            return int(match.group(1))
+
+    return None
 
 
 def _score_tag_match(
@@ -86,8 +139,8 @@ def _score_tag_match(
     if orig_lower == cand_lower:
         return 0.99 if variant_matches else 0.49
 
-    orig_parts, orig_suffix = _parse_version(orig_lower)
-    cand_parts, cand_suffix = _parse_version(cand_lower)
+    orig_parts, orig_suffix, _ = _parse_version(orig_lower)
+    cand_parts, cand_suffix, _ = _parse_version(cand_lower)
 
     score = 0.0
 
@@ -113,6 +166,19 @@ def _score_tag_match(
         # Penalize if candidate has extra version specificity we don't want
         if len(cand_parts) > len(orig_parts):
             score *= 0.95
+
+    # Handle JDK version matching (important for Java-based images like maven, gradle)
+    orig_jdk = _extract_jdk_version(orig_lower)
+    cand_jdk = _extract_jdk_version(cand_lower)
+
+    if orig_jdk is not None and cand_jdk is not None:
+        if orig_jdk == cand_jdk:
+            score += 0.15  # Significant bonus for matching JDK version
+        else:
+            score *= 0.3  # Heavy penalty for JDK version mismatch
+    elif orig_jdk is not None and cand_jdk is None:
+        # Original specifies JDK but candidate doesn't - mild penalty
+        score *= 0.8
 
     # Handle variant preference
     if variant_matches:
@@ -181,6 +247,190 @@ def _has_slim_tags(tags: list[str]) -> bool:
     return any("-slim" in tag.lower() for tag in tags)
 
 
+async def probe_image_capabilities(image_reference: str) -> tuple[bool, bool] | None:
+    """Probe an image to determine shell and apk availability.
+
+    Returns (has_shell, has_apk) or None if probing fails.
+    Results are cached in OrgSession to avoid duplicate crane calls.
+    """
+    # Check cache first
+    cached = OrgSession.get_image_capabilities(image_reference)
+    if cached is not None:
+        return cached
+
+    crane_path = shutil.which("crane")
+    if crane_path is None:
+        return None
+
+    try:
+        # Run crane export | tar -tf - to list files
+        proc = await asyncio.create_subprocess_shell(
+            f"{crane_path} export {image_reference} - | tar -tf -",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+        if proc.returncode != 0:
+            return None
+
+        file_list = stdout_bytes.decode()
+
+        # Check for shell binaries
+        has_shell = False
+        shell_paths = [
+            "bin/sh", "usr/bin/sh",
+            "bin/bash", "usr/bin/bash",
+            "bin/ash", "usr/bin/ash",
+            "bin/busybox", "usr/bin/busybox",
+        ]
+        for shell_path in shell_paths:
+            if shell_path in file_list:
+                has_shell = True
+                break
+
+        # Check for apk
+        has_apk = "sbin/apk" in file_list or "usr/bin/apk" in file_list
+
+        # Cache the result
+        OrgSession.set_image_capabilities(image_reference, has_shell, has_apk)
+
+        return has_shell, has_apk
+
+    except (asyncio.TimeoutError, Exception):
+        return None
+
+
+# Alias for backward compatibility within this module
+_probe_image_capabilities = probe_image_capabilities
+
+
+def _find_representative_tags(
+    tags: list[str], base_version: str
+) -> dict[str, str | None]:
+    """Find representative tags for each variant based on a base version.
+
+    Returns dict mapping variant name to tag (or None if not available).
+    """
+    # We want to find tags for distroless, slim, dev variants
+    # For a base_version like "23", we look for "23", "23-slim", "23-dev"
+    # For "latest", we look for "latest", "latest-slim", "latest-dev"
+
+    result: dict[str, str | None] = {
+        "distroless": None,
+        "slim": None,
+        "dev": None,
+    }
+
+    tags_lower = {t.lower(): t for t in tags}
+
+    # Normalize base version
+    base = base_version.lower()
+
+    # Remove any existing variant suffix from base
+    for suffix in ["-dev", "-slim"]:
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+
+    # Look for exact matches first
+    if base in tags_lower:
+        result["distroless"] = tags_lower[base]
+    if f"{base}-slim" in tags_lower:
+        result["slim"] = tags_lower[f"{base}-slim"]
+    if f"{base}-dev" in tags_lower:
+        result["dev"] = tags_lower[f"{base}-dev"]
+
+    # For any variant not found, try "latest" variants as fallback
+    if base != "latest":
+        if result["distroless"] is None and "latest" in tags_lower:
+            result["distroless"] = tags_lower["latest"]
+        if result["slim"] is None and "latest-slim" in tags_lower:
+            result["slim"] = tags_lower["latest-slim"]
+        if result["dev"] is None and "latest-dev" in tags_lower:
+            result["dev"] = tags_lower["latest-dev"]
+
+    # If slim is still not found but slim tags exist, find any slim tag to probe
+    if result["slim"] is None:
+        for tag_lower, tag_original in tags_lower.items():
+            if tag_lower.endswith("-slim"):
+                result["slim"] = tag_original
+                break
+
+    return result
+
+
+def _get_variant_description(has_shell: bool, has_apk: bool) -> tuple[str, str | None]:
+    """Generate description and recommendation based on actual probed capabilities.
+
+    Returns (description, recommended_for) tuple.
+    recommended_for is 'production', 'development', or None.
+    """
+    if has_apk:
+        return (
+            "Full image with shell and apk package manager. Use for building or when you need to install packages.",
+            "development",
+        )
+    elif has_shell:
+        return (
+            "Minimal image with shell but no package manager. Good for apps requiring shell.",
+            None,
+        )
+    else:
+        return (
+            "Smallest image, no shell, no apk. Best for production with minimal attack surface.",
+            "production",
+        )
+
+
+async def _probe_variant_capabilities(
+    image_name: str, org: str, tags: list[str], base_version: str
+) -> list[VariantCapabilities]:
+    """Probe available variants to determine their actual capabilities.
+
+    Returns list of VariantCapabilities for each variant that can be probed.
+    """
+    representative_tags = _find_representative_tags(tags, base_version)
+
+    capabilities: list[VariantCapabilities] = []
+
+    # Probe each variant in parallel
+    async def probe_variant(variant: str, tag: str | None) -> VariantCapabilities | None:
+        if tag is None:
+            return None
+
+        image_ref = f"cgr.dev/{org}/{image_name}:{tag}"
+        result = await _probe_image_capabilities(image_ref)
+
+        if result is None:
+            return None
+
+        has_shell, has_apk = result
+        description, recommended_for = _get_variant_description(has_shell, has_apk)
+        return VariantCapabilities(
+            variant=variant,
+            has_shell=has_shell,
+            has_apk=has_apk,
+            probed_tag=tag,
+            description=description,
+            recommended_for=recommended_for,
+        )
+
+    # Probe all variants in parallel
+    tasks = [
+        probe_variant(variant, tag)
+        for variant, tag in representative_tags.items()
+    ]
+    results = await asyncio.gather(*tasks)
+
+    for result in results:
+        if result is not None:
+            capabilities.append(result)
+
+    return capabilities
+
+
 async def lookup_tag(
     chainguard_image: Annotated[
         str,
@@ -196,56 +446,15 @@ async def lookup_tag(
     ],
     variant: Annotated[
         str,
-        Field(
-            description="Image variant to use. YOU MUST ASK THE USER before calling this tool. "
-            "Valid values: 'distroless', 'slim', or 'dev'. "
-            "Ask: 'Which image variant do you need? (distroless/slim/dev)' - "
-            "distroless: Smallest, most secure, no shell or package manager. "
-            "slim: Includes shell but no package manager. "
-            "dev: Includes shell and apk package manager for building/debugging."
-        ),
+        Field(description="Image variant: 'distroless', 'slim', or 'dev'"),
     ],
 ) -> TagLookupResult:
     """Find the best matching Chainguard tag for an original image tag.
 
-    Lists available tags for a Chainguard image using chainctl and finds
-    the closest match to the original tag based on version and variant matching.
+    Lists available tags and finds the closest match based on version and variant.
+    Returns variant_capabilities showing actual shell/apk availability for each variant.
 
-    CRITICAL: Before calling this tool, you MUST prompt the user to choose a variant.
-
-    If -slim tags are available for the image, ask:
-        "Which image variant do you need?
-        - distroless: Smallest and most secure, no shell or package manager (recommended for production)
-        - slim: Includes a shell but no package manager
-        - dev: Includes shell and apk package manager (for building apps or debugging)"
-
-    If NO -slim tags are available, ask:
-        "Which image variant do you need?
-        - distroless: Smallest and most secure, no shell or package manager (recommended for production)
-        - dev: Includes shell and apk package manager (for building apps or debugging)"
-
-    DO NOT infer or guess the answer from the Dockerfile - explicitly ask the user.
-
-    Based on user response, set variant to: 'distroless', 'slim', or 'dev'
-
-    IMPORTANT - Variant capabilities:
-    - distroless: No shell, no apk. Cannot run shell commands or install packages.
-    - slim: Has shell (/bin/sh), but no apk. Can run shell scripts but cannot install packages.
-    - dev: Has shell and apk. Can run shell scripts and install packages with apk add.
-
-    If the Dockerfile needs to install packages but user wants distroless for production,
-    use a multi-stage build pattern:
-        FROM cgr.dev/{org}/python:latest-dev AS builder
-        USER root
-        RUN apk add --no-cache build-base
-        RUN pip install --user mypackage
-        USER nonroot
-
-        FROM cgr.dev/{org}/python:latest
-        COPY --from=builder /home/nonroot/.local /home/nonroot/.local
-
-    NOTE: You must call lookup_chainguard_image first to select an organization
-    before using this tool.
+    Requires find_equivalent_chainguard_image to be called first to select an organization.
     """
     # Validate variant parameter
     variant_lower = variant.lower()
@@ -265,7 +474,7 @@ async def lookup_tag(
             chainguard_image=chainguard_image,
             original_image=original_image,
             original_tag=original_tag,
-            message="No organization selected. Call lookup_chainguard_image first to select an organization.",
+            message="No organization selected. Call find_equivalent_chainguard_image first to select an organization.",
         )
 
     client = ChainctlClient()
@@ -311,6 +520,12 @@ async def lookup_tag(
     # Sort tags by relevance for display
     sorted_tags = _get_sorted_tags(original_tag, tag_names, variant_lower)
 
+    # Probe variant capabilities in parallel (use best_tag or original_tag as base)
+    base_version = best_tag if best_tag else original_tag
+    variant_capabilities = await _probe_variant_capabilities(
+        chainguard_image, org, tag_names, base_version
+    )
+
     if best_tag is None or score < 0.3:
         return TagLookupResult(
             found=False,
@@ -320,6 +535,7 @@ async def lookup_tag(
             available_tags=sorted_tags,
             variant=variant_lower,
             has_slim_variant=has_slim,
+            variant_capabilities=variant_capabilities,
             message=f"No suitable tag match found for '{original_tag}'. "
             f"Available tags: {', '.join(sorted_tags[:10])}{'...' if len(sorted_tags) > 10 else ''}",
         )
@@ -336,6 +552,15 @@ async def lookup_tag(
             f"You may want to use '{original_tag}{suffix}' if available."
         )
 
+    # Add variant capabilities summary to messages
+    if variant_capabilities:
+        caps_summary = []
+        for cap in sorted(variant_capabilities, key=lambda c: c.variant):
+            shell_status = "shell" if cap.has_shell else "no shell"
+            apk_status = "apk" if cap.has_apk else "no apk"
+            caps_summary.append(f"{cap.variant}({cap.probed_tag}): {shell_status}, {apk_status}")
+        messages.append(f"Variant capabilities: {'; '.join(caps_summary)}")
+
     return TagLookupResult(
         found=True,
         chainguard_image=chainguard_image,
@@ -346,5 +571,6 @@ async def lookup_tag(
         available_tags=sorted_tags,
         variant=matched_variant,
         has_slim_variant=has_slim,
+        variant_capabilities=variant_capabilities,
         message=" ".join(messages) if messages else None,
     )

@@ -23,7 +23,7 @@ class Settings(BaseSettings):
         org = OrgSession.get_org()
         if org is None:
             raise OrgNotSelectedError(
-                "No Chainguard organization selected. Call the lookup_chainguard_image "
+                "No Chainguard organization selected. Call find_equivalent_chainguard_image "
                 "tool first - it will prompt you to select an organization."
             )
         return org
@@ -50,6 +50,8 @@ class OrgSession:
 
     _selected_org: str | None = None
     _available_orgs: list[str] | None = None
+    # Cache for image probing results: {image_ref: (has_shell, has_apk)}
+    _image_capabilities_cache: dict[str, tuple[bool, bool]] = {}
 
     @classmethod
     def get_org(cls) -> str | None:
@@ -58,7 +60,13 @@ class OrgSession:
 
     @classmethod
     def set_org(cls, org: str) -> None:
-        """Set the selected organization."""
+        """Set the selected organization.
+
+        Note: Changing the organization clears the image capabilities cache
+        since image references are org-specific.
+        """
+        if org != cls._selected_org:
+            cls._image_capabilities_cache.clear()
         cls._selected_org = org
 
     @classmethod
@@ -82,7 +90,18 @@ class OrgSession:
         return cls._selected_org == PUBLIC_REGISTRY
 
     @classmethod
+    def get_image_capabilities(cls, image_ref: str) -> tuple[bool, bool] | None:
+        """Get cached image capabilities (has_shell, has_apk) or None if not cached."""
+        return cls._image_capabilities_cache.get(image_ref)
+
+    @classmethod
+    def set_image_capabilities(cls, image_ref: str, has_shell: bool, has_apk: bool) -> None:
+        """Cache image capabilities."""
+        cls._image_capabilities_cache[image_ref] = (has_shell, has_apk)
+
+    @classmethod
     def clear(cls) -> None:
         """Clear the session state."""
         cls._selected_org = None
         cls._available_orgs = None
+        cls._image_capabilities_cache.clear()

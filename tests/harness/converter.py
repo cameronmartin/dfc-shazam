@@ -128,8 +128,8 @@ class DockerfileConverter:
 
             # Verify the target image exists
             if verify and result.found:
-                verify_result = await self.mcp.verify_tag(target_image)
-                if not verify_result.exists:
+                migration_result = await self.mcp.get_migration_instructions(target_image)
+                if not migration_result.exists:
                     warnings.append(
                         f"Target image '{target_image}' could not be verified. "
                         "It may not exist or chainctl auth may be required."
@@ -158,7 +158,7 @@ class DockerfileConverter:
             return
 
         # Map all packages in a single batch call
-        batch_result = await self.mcp.map_package(all_packages, source_distro)
+        batch_result = await self.mcp.find_equivalent_apk_packages(all_packages, source_distro)
 
         for result in batch_result.results:
             pkg = result.source_package

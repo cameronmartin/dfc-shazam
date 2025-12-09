@@ -143,9 +143,9 @@ RUN apt-get update && apt-get install -y curl wget git
         assert result.success
         assert len(result.mcp_calls) > 0
 
-        # Should have called lookup_chainguard_image
+        # Should have called find_equivalent_chainguard_image
         lookup_calls = [
-            c for c in result.mcp_calls if c["tool"] == "lookup_chainguard_image"
+            c for c in result.mcp_calls if c["tool"] == "find_equivalent_chainguard_image"
         ]
         assert len(lookup_calls) >= 1
 

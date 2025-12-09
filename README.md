@@ -6,13 +6,10 @@ MCP server for Dockerfile to Chainguard image conversion assistance.
 
 dfc-shazam provides AI assistants with tools to help convert Dockerfiles to use Chainguard images. It offers:
 
-- **Image lookup**: Find Chainguard equivalents for Docker Hub images
-- **Tag lookup**: Find the best matching Chainguard tag for an original image tag
-- **Tag verification**: Verify image:tag combinations exist in the Chainguard registry
-- **Package search**: Search the Chainguard APK package index
-- **Package mapping**: Map apt/yum package names to APK equivalents
-- **Package verification**: Verify APK packages install correctly in a container
-- **Image documentation**: Get best practices and documentation for Chainguard images
+- **Image lookup**: Find Chainguard equivalents for Docker Hub images (includes organization and variant selection)
+- **Migration instructions**: Get best practices, entrypoint guidance, and user/permission documentation
+- **Package mapping**: Map apt/yum package names to APK equivalents (uses builtin mappings from [dfc](https://github.com/chainguard-dev/dfc) with fuzzy search fallback)
+- **Package validation**: Verify APK packages install correctly before editing Dockerfiles
 
 ## Prerequisites
 
@@ -29,9 +26,9 @@ dfc-shazam provides AI assistants with tools to help convert Dockerfiles to use 
    chainctl auth login
    ```
 
-3. **crane** (optional) - Required for `verify_image_tag` to retrieve image configuration (entrypoint, shell/apk availability). Installed with `go install github.com/google/go-containerregistry/cmd/crane@latest`
+3. **crane** (optional) - Required for image configuration inspection (entrypoint, shell/apk availability). Install with `go install github.com/google/go-containerregistry/cmd/crane@latest`
 
-4. **Docker** (optional) - Required for `verify_apk_packages` and `get_image_overview` filesystem inspection
+4. **Docker** (optional) - Required for `validate_apk_packages_install` and filesystem inspection
 
 ## Installation
 
@@ -86,190 +83,80 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 uv run mcp dev src/dfc_shazam/server.py
 ```
 
-## Organization Selection
+## Recommended Workflow
 
-On first use, the `lookup_chainguard_image` tool will retrieve your available Chainguard organizations from `chainctl auth status` and prompt you to select one. This organization is used for all subsequent image operations in the session.
-
-All Chainguard images are referenced using `cgr.dev/{org}/<image>` format, where `{org}` is your selected organization. Never use `cgr.dev/chainguard/<image>`.
+1. **find_equivalent_chainguard_image** - Find the Chainguard image equivalent (handles org and variant selection)
+2. **get_migration_instructions_for_chainguard_image** - Get migration guidance and best practices
+3. **find_equivalent_apk_packages** - Map apt/yum packages to APK equivalents
+4. **validate_apk_packages_install** - Verify packages install before editing Dockerfile
 
 ## Tools
 
-### lookup_chainguard_image
+### find_equivalent_chainguard_image
 
-Find Chainguard equivalents for Docker Hub images. On first call, prompts for organization selection.
+Find Chainguard equivalents for Docker Hub images. Handles organization selection, variant selection, and tag matching with JDK-aware version matching.
 
 **Parameters:**
-- `source_image` (required): Source Docker Hub image name (e.g., "python", "node:18", "nginx")
-- `organization` (optional): Chainguard organization name. If not provided on first call, available organizations will be listed for selection.
+- `source_image_and_tag` (required): Source image with optional tag (e.g., "python:3.12", "maven:3.8-eclipse-temurin-17")
+- `organization` (optional): Chainguard organization name
+- `variant` (optional): "distroless", "slim", or "dev"
 
-**Example (first call):**
-```
-Input: source_image="python"
-Output:
-  - found: false
-  - message: "ORGANIZATION SELECTION REQUIRED - You have access to: org1, org2, org3..."
-```
+**Tag Matching Features:**
+- Matches versioned tags with prefixes (e.g., `adoptium-openjdk-17`)
+- JDK-aware matching: `maven:3.8-eclipse-temurin-17` correctly matches `3.8-jdk17-dev`, not `3.8-jdk11-dev`
+- Penalizes JDK version mismatches to avoid wrong Java version selection
 
-**Example (with organization):**
-```
-Input: source_image="python", organization="my-org"
-Output:
-  - chainguard_image: cgr.dev/my-org/python
-  - recommendation: Use cgr.dev/my-org/python
-```
+### get_migration_instructions_for_chainguard_image
 
-### verify_image_tag
-
-Verify an image:tag exists in the Chainguard registry and retrieve its configuration.
+Get comprehensive migration guidance for a Chainguard image.
 
 **Parameters:**
 - `image_reference` (required): Full image reference (e.g., "cgr.dev/{org}/python:3.12")
 
-**Example:**
-```
-Input: image_reference="cgr.dev/my-org/python:3.12"
-Output:
-  - exists: true
-  - digest: sha256:abc123...
-  - config:
-      entrypoint: ["/usr/bin/python"]
-      cmd: null
-      user: "65532"
-      workdir: "/app"
-      env: ["PATH=...", "SSL_CERT_FILE=..."]
-      has_shell: false
-      has_apk: false
-```
+**Returns:**
+- Image configuration (entrypoint, cmd, user, shell/apk availability)
+- Entrypoint guidance and compatibility notes
+- User/permission guidance (critical for non-root containers)
+- Conversion tips and best practices
+- Linked documentation from edu.chainguard.dev
 
-Note: `config` requires `crane` to be installed. The `has_shell` and `has_apk` fields indicate whether the image contains a shell and/or apk package manager.
+### find_equivalent_apk_packages
 
-### search_apk_packages
-
-Search the Chainguard APK package index.
+Map apt/yum package names to APK equivalents. Uses builtin mappings from [dfc](https://github.com/chainguard-dev/dfc) with fuzzy search fallback.
 
 **Parameters:**
-- `query` (required): Package name or search term
-- `arch` (optional): Architecture, "x86_64" (default) or "aarch64"
-- `limit` (optional): Maximum results (default: 20, max: 100)
-- `search_type` (optional): "name" (default), "cmd" (find package providing a command), or "so" (find package providing a shared library)
-
-**Example:**
-```
-Input: query="openssl"
-Output:
-  - packages: [{name: "openssl", version: "3.2.1-r0", ...}, ...]
-  - total_count: 5
-```
-
-### map_package
-
-Map apt/yum package names to APK equivalents. Accepts multiple packages in a single call for efficiency.
-
-**Parameters:**
-- `packages` (required): List of source package names (e.g., `["libssl-dev", "build-essential", "curl"]`)
+- `packages` (required): List of package names (e.g., `["libssl-dev", "build-essential"]`)
 - `source_distro` (optional): "apt", "yum", "dnf", or "auto" (default)
 
-**Example:**
-```
-Input: packages=["libssl-dev", "curl"], source_distro="apt"
-Output:
-  - source_distro: "apt"
-  - results: [
-      {source_package: "libssl-dev", best_match: "openssl-dev", ...},
-      {source_package: "curl", best_match: "curl", ...}
-    ]
-  - summary: "APK packages: openssl-dev curl"
-```
+**Mapping Sources:**
+1. Builtin mappings (vendored from dfc) - exact matches
+2. Fuzzy search against Wolfi APK index - for packages not in builtin mappings
 
-### lookup_tag
+### validate_apk_packages_install
 
-Find the best matching Chainguard tag for an original image tag.
+Verify APK packages install correctly using a dry-run simulation.
 
 **Parameters:**
-- `chainguard_image` (required): Chainguard image name (e.g., "python", "node")
-- `original_image` (required): Original source image name (e.g., "python", "node:18-alpine")
-- `original_tag` (required): Original tag to match (e.g., "3.12", "18-alpine", "latest")
-- `variant` (required): Image variant - "distroless", "slim", or "dev"
+- `packages` (required): List of APK package names to verify
+- `arch` (optional): "x86_64" (default) or "aarch64"
 
-**Example:**
-```
-Input: chainguard_image="python", original_image="python", original_tag="3.12", variant="distroless"
-Output:
-  - found: true
-  - matched_tag: "3.12"
-  - full_image_ref: "cgr.dev/my-org/python:3.12"
-  - variant: "distroless"
-  - has_slim_variant: false
-  - available_tags: ["3.12", "3.12-dev", "3.11", ...]
-```
-
-**Variants:**
-- `distroless`: Smallest and most secure, no shell or package manager (recommended for production)
-- `slim`: Includes a shell but no package manager
-- `dev`: Includes shell and apk package manager (for building apps or debugging)
-
-Note: Not all images have `-slim` variants. The `has_slim_variant` field indicates availability.
-
-### verify_apk_packages
-
-Verify that APK packages install correctly in a Chainguard container using a dry-run.
-
-**Parameters:**
-- `packages` (required): List of APK package names to verify (e.g., `["openssl", "curl", "git"]`)
-- `arch` (optional): Architecture, "x86_64" (default) or "aarch64"
-
-**Example:**
-```
-Input: packages=["openssl", "curl"]
-Output:
-  - success: true
-  - packages: ["openssl", "curl"]
-  - installed: ["openssl", "curl"]
-  - message: "All 2 package(s) verified successfully (dry-run)."
-```
-
-### get_image_overview
-
-Get overview documentation and best practices for a Chainguard image. Automatically follows links to retrieve content from related documentation pages (getting started guides, best practices, migration guides). Also inspects the container filesystem to show directory ownership and permissions.
-
-**Parameters:**
-- `image_name` (required): Chainguard image name (e.g., "python", "node", "nginx")
-
-**Example:**
-```
-Input: image_name="python"
-Output:
-  - found: true
-  - image_name: "python"
-  - overview_url: "https://images.chainguard.dev/directory/image/python/overview"
-  - overview_text: "Chainguard Container for Python development..."
-  - best_practices: [
-      {url: "https://edu.chainguard.dev/...", title: "Getting Started", content: "..."},
-      {url: "https://edu.chainguard.dev/...", title: "Best Practices", content: "..."}
-    ]
-  - filesystem_tree: |
-      drwxr-xr-x root:root /
-      drwxr-xr-x root:root /etc
-      drwxr-xr-x root:root /home
-      drwxr-xr-x nonroot:nonroot /home/nonroot
-      ...
-```
-
-Note: `filesystem_tree` requires Docker to be available. If Docker is not installed, this field will be `null` but other information will still be returned.
+**Important:** Always validate packages before editing Dockerfiles. Package mappings are suggestions that may be incorrect.
 
 ## Package Mappings
 
-The tool includes mappings for common packages:
+Builtin mappings are vendored from [chainguard-dev/dfc](https://github.com/chainguard-dev/dfc):
 
 | apt (Debian/Ubuntu) | APK (Chainguard) |
-|---------------------|-------------|
+|---------------------|------------------|
 | build-essential | build-base |
-| libssl-dev | openssl-dev |
-| python3-dev | python-3-dev |
-| libpq-dev | postgresql-dev, libpq-dev |
+| libssl-dev | libssl3 |
+| libpq-dev | postgresql-dev |
+| python3 | python-3 |
+| python3-pip | py3-pip |
+| ssh | openssh-client, openssh-server |
 | ... | ... |
 
-Package mappings are computed dynamically using fuzzy matching against the Chainguard APK index.
+Packages not in builtin mappings fall back to fuzzy search against the Wolfi APK index.
 
 ## Image Mappings
 
@@ -278,12 +165,10 @@ Package mappings are computed dynamically using fuzzy matching against the Chain
 | python | cgr.dev/{org}/python |
 | node | cgr.dev/{org}/node |
 | golang/go | cgr.dev/{org}/go |
-| nginx | cgr.dev/{org}/nginx |
-| postgres | cgr.dev/{org}/postgres |
+| eclipse-temurin | cgr.dev/{org}/adoptium-jdk or adoptium-jre |
+| maven | cgr.dev/{org}/maven |
 | alpine/ubuntu/debian | cgr.dev/{org}/chainguard-base |
 | ... | ... |
-
-Image aliases are loaded from [src/dfc_shazam/mappings/image_aliases.csv](src/dfc_shazam/mappings/image_aliases.csv).
 
 ## Development
 
