@@ -66,6 +66,10 @@ class ImageVerificationResult(BaseModel):
         default=None,
         description="Container configuration (entrypoint, user, shell availability, etc.)",
     )
+    entrypoint_guidance: str | None = Field(
+        default=None,
+        description="Actionable guidance about the image's entrypoint configuration and how it may differ from original images",
+    )
     message: str | None = None
 
 

@@ -12,6 +12,57 @@ from dfc_shazam.config import OrgSession
 from dfc_shazam.models import ImageConfig, ImageVerificationResult
 
 
+def _generate_entrypoint_guidance(config: ImageConfig, image_reference: str) -> str:
+    """Generate guidance about the image's entrypoint configuration.
+
+    Provides both specific details about the actual entrypoint/cmd values
+    and general best practices for working with the image.
+    """
+    lines = ["ENTRYPOINT CONFIGURATION:"]
+
+    # Part 1: Specific details
+    if config.entrypoint:
+        lines.append(f"  Entrypoint: {config.entrypoint}")
+    else:
+        lines.append("  Entrypoint: None (not set)")
+
+    if config.cmd:
+        lines.append(f"  Cmd: {config.cmd}")
+    else:
+        lines.append("  Cmd: None (not set)")
+
+    if config.user:
+        lines.append(f"  User: {config.user}")
+
+    lines.append(f"  Shell available: {'Yes' if config.has_shell else 'No'}")
+    lines.append(f"  Apk available: {'Yes' if config.has_apk else 'No'}")
+
+    # Part 2: Guidance based on configuration
+    lines.append("")
+    lines.append("GUIDANCE:")
+
+    if config.entrypoint:
+        lines.append(f"- This image has ENTRYPOINT {config.entrypoint}")
+        lines.append("- Any CMD you set will be passed as arguments to the entrypoint")
+        lines.append("- Review get_image_overview for image-specific usage patterns and best practices")
+    else:
+        lines.append("- This image has NO entrypoint set")
+        lines.append("- CMD will be executed directly as the container command")
+        lines.append("- You may need to set ENTRYPOINT in your Dockerfile")
+
+    # Shell availability guidance
+    if not config.has_shell:
+        lines.append("- This is a distroless image - shell-form commands will NOT work")
+        lines.append("- Use exec form: CMD [\"executable\", \"arg1\"] not CMD \"executable arg1\"")
+    else:
+        lines.append("- Shell is available - both exec form and shell form commands will work")
+
+    # General reminder
+    lines.append("- IMPORTANT: Compare with your original image's entrypoint to ensure compatible behavior")
+
+    return "\n".join(lines)
+
+
 async def _get_crane_config(image_reference: str) -> ImageConfig | None:
     """Get image configuration using crane config.
 
@@ -108,6 +159,14 @@ async def verify_image_tag(
     IMPORTANT: Always use cgr.dev/{org}/<image> format where {org} is your
     Chainguard organization name. Never use cgr.dev/chainguard/<image>.
 
+    CRITICAL - ENTRYPOINT REVIEW: When the image exists, carefully review the
+    `entrypoint_guidance` field in the response. Chainguard image entrypoints
+    may differ from the original image you're converting from. Key considerations:
+    - Check if the entrypoint matches your original image's behavior
+    - Distroless images cannot use shell-form commands
+    - CMD arguments are appended to the entrypoint, not executed directly
+    - You may need to adjust your Dockerfile's CMD or ENTRYPOINT accordingly
+
     NOTE: You must call lookup_chainguard_image first to select an organization
     before using this tool.
     """
@@ -146,11 +205,17 @@ async def verify_image_tag(
             # Get image configuration using crane
             config = await _get_crane_config(image_reference)
 
+            # Generate entrypoint guidance if we have config
+            entrypoint_guidance = None
+            if config:
+                entrypoint_guidance = _generate_entrypoint_guidance(config, image_reference)
+
             return ImageVerificationResult(
                 exists=True,
                 image_reference=image_reference,
                 digest=result.digest,
                 config=config,
+                entrypoint_guidance=entrypoint_guidance,
             )
         else:
             return ImageVerificationResult(
