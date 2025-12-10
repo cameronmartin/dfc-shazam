@@ -1,5 +1,7 @@
 # dfc-shazam
 
+> **Note:** This is an unofficial tool and is not officially supported by Chainguard.
+
 MCP server for Dockerfile to Chainguard image conversion assistance.
 
 ## Overview
