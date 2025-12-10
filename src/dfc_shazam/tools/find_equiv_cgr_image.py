@@ -1,6 +1,6 @@
 """Tool for looking up Chainguard image equivalents."""
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import Field
 
@@ -10,8 +10,14 @@ from dfc_shazam.mappings.images import (
     is_generic_base_image,
     lookup_chainguard_image as lookup_image_matches,
 )
-from dfc_shazam.models import ChainguardImageResult, VariantCapabilities
+from dfc_shazam.mappings.image_runtime_config import (
+    IMAGE_RUNTIME_CONFIG,
+    MULTI_STAGE_COPY_GUIDANCE,
+    DEFAULT_CHAINGUARD_USER,
+)
+from dfc_shazam.models import ChainguardImageResult, RuntimeRecommendation, VariantCapabilities
 from dfc_shazam.tools.lookup_tag import (
+    _extract_jdk_version,
     _find_best_tag,
     _get_tag_variant,
     _has_slim_tags,
@@ -109,6 +115,138 @@ def _format_variant_capabilities(capabilities: list[VariantCapabilities]) -> str
         if cap.description:
             lines.append(f"      {cap.description}")
     return "\n".join(lines)
+
+
+def _extract_jdk_vendor_from_tag(tag: str) -> str | None:
+    """Extract JDK vendor from Maven/Gradle tag.
+
+    Examples:
+        "3.9-eclipse-temurin-17" -> "eclipse-temurin"
+        "8.5-jdk17-corretto" -> "corretto"
+        "3.9-openjdk-17" -> "openjdk"
+    """
+    tag_lower = tag.lower()
+    if "eclipse-temurin" in tag_lower or "temurin" in tag_lower:
+        return "eclipse-temurin"
+    if "corretto" in tag_lower:
+        return "corretto"
+    if "openjdk" in tag_lower:
+        return "openjdk"
+    return None
+
+
+def _extract_jdk_version_from_tag(tag: str) -> str | None:
+    """Extract JDK version from tag.
+
+    Examples:
+        "3.9-eclipse-temurin-17" -> "17"
+        "17.0.2" -> "17"
+        "latest" -> None
+    """
+    version = _extract_jdk_version(tag)
+    return str(version) if version else None
+
+
+async def _verify_image_exists(
+    client: ChainctlClient, image: str, org: str, tag: str
+) -> bool:
+    """Verify an image:tag exists in the registry."""
+    try:
+        tags = await client.list_tags(image, org)
+        tag_names = [t.tag for t in tags]
+        # Check for exact match, or latest variants
+        if tag in tag_names:
+            return True
+        if tag == "latest" and ("latest" in tag_names or "latest-dev" in tag_names):
+            return True
+        return False
+    except ChainctlError:
+        return False
+
+
+async def _build_runtime_recommendations(
+    config: dict[str, Any],
+    org: str,
+    matched_tag: str | None,
+    client: ChainctlClient,
+) -> tuple[list[RuntimeRecommendation], str | None]:
+    """Build and verify runtime recommendations from config.
+
+    Returns (recommendations, multi_stage_guidance).
+    """
+    recommendations: list[RuntimeRecommendation] = []
+    guidance: str | None = None
+    config_type = config["type"]
+
+    if config_type == "compile_to_binary":
+        # Go/Rust: recommend static or glibc-dynamic
+        for opt in config["runtime_options"]:
+            image_ref = f"cgr.dev/{org}/{opt['image']}:latest"
+            verified = await _verify_image_exists(client, opt["image"], org, "latest")
+            recommendations.append(
+                RuntimeRecommendation(
+                    image=opt["image"],
+                    full_image_ref=image_ref,
+                    description=opt["description"],
+                    is_default=opt.get("default", False),
+                    build_flags=opt.get("build_flags", []),
+                    verified=verified,
+                )
+            )
+
+    elif config_type == "sdk_runtime_pair":
+        # JDK -> JRE
+        runtime = config["runtime_image"]
+        # Try to match version from the matched tag
+        version_tag = "latest"
+        if matched_tag:
+            jdk_version = _extract_jdk_version_from_tag(matched_tag)
+            if jdk_version:
+                version_tag = jdk_version
+
+        image_ref = f"cgr.dev/{org}/{runtime}:{version_tag}"
+        verified = await _verify_image_exists(client, runtime, org, version_tag)
+        recommendations.append(
+            RuntimeRecommendation(
+                image=runtime,
+                full_image_ref=image_ref,
+                description="Java Runtime Environment for running compiled JAR/WAR files",
+                is_default=True,
+                verified=verified,
+            )
+        )
+
+    elif config_type == "build_tool_with_jdk":
+        # Maven/Gradle: determine JRE based on JDK vendor in tag
+        jdk_vendor = _extract_jdk_vendor_from_tag(matched_tag or "")
+        jdk_runtime_mapping = config.get("jdk_runtime_mapping", {})
+        runtime = jdk_runtime_mapping.get(jdk_vendor, config["default_runtime"])
+
+        version_tag = "latest"
+        if matched_tag:
+            jdk_version = _extract_jdk_version_from_tag(matched_tag)
+            if jdk_version:
+                version_tag = jdk_version
+
+        image_ref = f"cgr.dev/{org}/{runtime}:{version_tag}"
+        verified = await _verify_image_exists(client, runtime, org, version_tag)
+        vendor_info = f" (matched from {jdk_vendor})" if jdk_vendor else ""
+        recommendations.append(
+            RuntimeRecommendation(
+                image=runtime,
+                full_image_ref=image_ref,
+                description=f"Java Runtime for compiled artifacts{vendor_info}",
+                is_default=True,
+                verified=verified,
+            )
+        )
+
+    elif config_type == "same_family":
+        # Python/Node: same image, different variant
+        guidance = config.get("multi_stage_guidance")
+        # No separate runtime image needed, just variant guidance
+
+    return recommendations, guidance
 
 
 async def find_equivalent_chainguard_image(
@@ -339,6 +477,24 @@ async def find_equivalent_chainguard_image(
     full_image_ref = f"cgr.dev/{org}/{chainguard_name}:{best_tag}"
     matched_variant = _get_tag_variant(best_tag)
 
+    # Step 8: Check for build-only image and add runtime recommendations
+    runtime_config = IMAGE_RUNTIME_CONFIG.get(chainguard_name)
+    is_build_only = False
+    runtime_recommendations: list[RuntimeRecommendation] = []
+    multi_stage_guidance: str | None = None
+
+    if runtime_config:
+        config_type = runtime_config["type"]
+        is_build_only = config_type in (
+            "compile_to_binary",
+            "sdk_runtime_pair",
+            "build_tool_with_jdk",
+        )
+
+        runtime_recommendations, multi_stage_guidance = await _build_runtime_recommendations(
+            runtime_config, org, best_tag, client
+        )
+
     messages = []
     if public_warning:
         messages.append(public_warning.rstrip())
@@ -351,8 +507,45 @@ async def find_equivalent_chainguard_image(
             f"Note: '{variant_lower}' variant was requested but '{best_tag}' was the best version match."
         )
 
-    messages.append(f"\n⚠️ NEXT STEP: Call get_image_overview with image_name=\"{chainguard_name}\" to retrieve "
-                   "best practices and conversion guidance BEFORE modifying any Dockerfile.")
+    # Add runtime guidance to messages for build-only images
+    if is_build_only and runtime_recommendations:
+        verified_recs = [r for r in runtime_recommendations if r.verified]
+        if verified_recs:
+            rec_lines = []
+            for rec in verified_recs:
+                default_marker = " (recommended)" if rec.is_default else ""
+                flags = f" [requires: {', '.join(rec.build_flags)}]" if rec.build_flags else ""
+                rec_lines.append(
+                    f"  - {rec.full_image_ref}{default_marker}{flags}: {rec.description}"
+                )
+
+            messages.append(
+                f"\n🎯 MULTI-STAGE BUILD RECOMMENDED\n"
+                f"'{chainguard_name}' is a build-only image. "
+                f"For production, use a separate runtime image:\n"
+                + "\n".join(rec_lines)
+            )
+
+        # Add COPY guidance for build-only images
+        copy_guidance_template = MULTI_STAGE_COPY_GUIDANCE.get(chainguard_name)
+        if copy_guidance_template:
+            # Use default user as example, but note that actual user should be verified
+            copy_example = copy_guidance_template.format(user=DEFAULT_CHAINGUARD_USER)
+            messages.append(
+                f"\n📋 COPY with --chown (CRITICAL): Chainguard images run as non-root. "
+                f"Always use --chown when copying artifacts:\n  {copy_example}\n"
+                f"NOTE: The runtime image user may differ (e.g., postgres, nginx). "
+                f"Verify with get_migration_instructions_for_chainguard_image."
+            )
+
+    if multi_stage_guidance:
+        messages.append(f"\n📦 Multi-stage tip: {multi_stage_guidance}")
+
+    messages.append(
+        f"\n⚠️ NEXT STEP: Call get_migration_instructions_for_chainguard_image "
+        f"with image_reference=\"{full_image_ref}\" to retrieve "
+        "best practices and conversion guidance BEFORE modifying any Dockerfile."
+    )
 
     return ChainguardImageResult(
         found=True,
@@ -366,6 +559,9 @@ async def find_equivalent_chainguard_image(
         is_generic_base=False,
         available_variants=available_variants,
         variant_capabilities=variant_capabilities,
+        is_build_only=is_build_only,
+        runtime_recommendations=runtime_recommendations,
+        multi_stage_guidance=multi_stage_guidance,
         recommendation=f"Use {full_image_ref}",
         message=" ".join(messages) if messages else None,
     )

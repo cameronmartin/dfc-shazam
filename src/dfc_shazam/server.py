@@ -94,10 +94,23 @@ CRITICAL BEHAVIORAL REQUIREMENTS:
    - distroless/slim: May or may not have shell depending on the image
    - Do NOT assume based on variant name alone
 
+9. BUILD-ONLY IMAGES AND RUNTIME RECOMMENDATIONS:
+   - If find_equivalent_chainguard_image returns is_build_only=True, the image should NOT be used for runtime
+   - Check runtime_recommendations field for verified runtime images to use in multi-stage builds
+   - Common patterns:
+     - go/rust → static (for static binaries) or glibc-dynamic (for dynamic binaries)
+     - jdk → jre (matching version)
+     - maven/gradle → jre or adoptium-jre (based on JDK variant in tag)
+   - For python/node: Use -dev variant for build, distroless for runtime (same image family)
+   - Check multi_stage_guidance field for artifact copy instructions
+
 COMMON IMAGE EQUIVALENTS:
 - eclipse-temurin → adoptium-jdk or adoptium-jre
 - openjdk → jdk or jre
 - amazoncorretto → amazon-corretto-jdk or amazon-corretto-jre
+- golang → go (build-only, use static/glibc-dynamic for runtime)
+- rust → rust (build-only, use static/glibc-dynamic for runtime)
+- maven/gradle → maven/gradle (build-only, use jre for runtime)
 """,
 )
 

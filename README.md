@@ -7,6 +7,7 @@ MCP server for Dockerfile to Chainguard image conversion assistance.
 dfc-shazam provides AI assistants with tools to help convert Dockerfiles to use Chainguard images. It offers:
 
 - **Image lookup**: Find Chainguard equivalents for Docker Hub images (includes organization and variant selection)
+- **Runtime recommendations**: Automatic guidance for build-only images (Go, Rust, JDK, Maven, Gradle) with recommended runtime images for multi-stage builds
 - **Migration instructions**: Get best practices, entrypoint guidance, and user/permission documentation
 - **Package mapping**: Map apt/yum package names to APK equivalents (uses builtin mappings from [dfc](https://github.com/chainguard-dev/dfc) with fuzzy search fallback against Wolfi APK index and Chainguard extras repository)
 - **Package validation**: Verify APK packages install correctly before editing Dockerfiles
@@ -192,9 +193,6 @@ Packages not in builtin mappings fall back to fuzzy search against the Wolfi APK
 ```bash
 # Install with dev dependencies
 uv sync --all-extras
-
-# Run tests
-uv run pytest
 
 # Lint
 uv run ruff check src/

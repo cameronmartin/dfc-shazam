@@ -3,6 +3,27 @@
 from pydantic import BaseModel, Field
 
 
+class RuntimeRecommendation(BaseModel):
+    """Recommended runtime image for multi-stage builds."""
+
+    image: str = Field(description="Runtime image name (e.g., 'static', 'jre')")
+    full_image_ref: str = Field(
+        description="Full image reference (e.g., 'cgr.dev/{org}/static:latest')"
+    )
+    description: str = Field(description="When to use this runtime")
+    is_default: bool = Field(
+        default=False, description="Whether this is the default recommendation"
+    )
+    build_flags: list[str] = Field(
+        default_factory=list,
+        description="Build flags needed (e.g., ['CGO_ENABLED=0'])",
+    )
+    verified: bool = Field(
+        default=False,
+        description="Whether the image was verified to exist in the registry",
+    )
+
+
 class VariantCapabilities(BaseModel):
     """Actual capabilities of a variant determined by image inspection."""
 
@@ -65,6 +86,22 @@ class ChainguardImageResult(BaseModel):
     variant_capabilities: list[VariantCapabilities] = Field(
         default_factory=list,
         description="Actual shell/apk capabilities for each variant, determined by image inspection.",
+    )
+    # Build/runtime guidance fields
+    is_build_only: bool = Field(
+        default=False,
+        description="True if this is a build-only image (go, rust, jdk, maven, etc.) "
+        "that shouldn't be used for runtime",
+    )
+    runtime_recommendations: list[RuntimeRecommendation] = Field(
+        default_factory=list,
+        description="Recommended runtime images for multi-stage builds. "
+        "Only populated for build-only images.",
+    )
+    multi_stage_guidance: str | None = Field(
+        default=None,
+        description="Guidance for multi-stage builds "
+        "(e.g., how to copy artifacts from builder stage)",
     )
 
 

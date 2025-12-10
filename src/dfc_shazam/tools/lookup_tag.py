@@ -11,8 +11,8 @@ from dfc_shazam.chainctl import ChainctlClient, ChainctlError
 from dfc_shazam.config import OrgSession
 from dfc_shazam.models import TagLookupResult, VariantCapabilities
 
-# Re-export for use by image_docs.py
-__all__ = ["lookup_tag", "probe_image_capabilities"]
+# Re-export for use by other modules
+__all__ = ["lookup_tag", "probe_image_capabilities", "_extract_jdk_version"]
 
 
 def _parse_version(tag: str) -> tuple[list[int], str, str]:
